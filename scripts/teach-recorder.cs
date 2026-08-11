@@ -18,6 +18,7 @@ public static class AIWorkstationTeachRecorder
     private const int WM_RBUTTONDOWN = 0x0204;
     private const int WM_RBUTTONUP = 0x0205;
     private const int WM_MOUSEWHEEL = 0x020A;
+    private const int WM_MOUSEMOVE = 0x0200;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_SYSKEYDOWN = 0x0104;
     private const uint GA_ROOT = 2;
@@ -32,6 +33,7 @@ public static class AIWorkstationTeachRecorder
         public long targetWindowHandle;
         public BoundsConfig allowedBounds;
         public string outputPath;
+        public string livePath;
         public string readyPath;
         public string stopPath;
         public int maxDurationMs;
@@ -97,6 +99,11 @@ public static class AIWorkstationTeachRecorder
     private static AutomationPropertyChangedEventHandler valueChangedHandler;
     private static AutomationEventHandler invokedHandler;
     private static bool stopping;
+    private static bool hasLastMove;
+    private static POINT lastMove;
+    private static long lastMoveAtMs;
+    private static int lastLiveEventCount = -1;
+    private static long lastKeyboardAtMs = -10000;
 
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetWindowsHookEx(int idHook, HookProc callback, IntPtr module, uint threadId);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UnhookWindowsHookEx(IntPtr hook);
@@ -126,6 +133,7 @@ public static class AIWorkstationTeachRecorder
             if (mouseHook == IntPtr.Zero || keyboardHook == IntPtr.Zero) throw new InvalidOperationException("Could not install teaching hooks.");
             TrySubscribeValueChanges();
             Directory.CreateDirectory(Path.GetDirectoryName(config.outputPath));
+            WriteSnapshot(config.livePath, false);
             File.WriteAllText(config.readyPath, DateTime.UtcNow.ToString("o"), new UTF8Encoding(false));
             context = new RecordingContext();
             Application.Run(context);
@@ -179,12 +187,18 @@ public static class AIWorkstationTeachRecorder
         {
             AutomationElement element = sender as AutomationElement;
             if (element == null || element.Current.ProcessId != targetAutomation.Current.ProcessId) return;
+            long now = Clock.ElapsedMilliseconds;
+            if (now - lastKeyboardAtMs > 1500) return;
+            AutomationElement focused = AutomationElement.FocusedElement;
+            if (focused == null || !Automation.Compare(element, focused)) return;
+            ControlType controlType = element.Current.ControlType;
+            if (controlType != ControlType.Edit && controlType != ControlType.Document && controlType != ControlType.ComboBox) return;
             System.Windows.Rect bounds = element.Current.BoundingRectangle;
             if (bounds.IsEmpty) return;
             bool sensitive = element.Current.IsPassword;
             RecordedEvent item = new RecordedEvent {
                 type = "typeText",
-                atMs = Clock.ElapsedMilliseconds,
+                atMs = now,
                 x = (int)Math.Round(bounds.X + bounds.Width / 2),
                 y = (int)Math.Round(bounds.Y + bounds.Height / 2),
                 text = sensitive ? null : Convert.ToString(args.NewValue),
@@ -239,7 +253,8 @@ public static class AIWorkstationTeachRecorder
         {
             MSLLHOOKSTRUCT data = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
             int message = wParam.ToInt32();
-            if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt)) leftDown = NewPending(data.pt, "left");
+            if (message == WM_MOUSEMOVE && PointBelongsToTarget(data.pt)) RecordPointerMove(data.pt);
+            else if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt)) leftDown = NewPending(data.pt, "left");
             else if (message == WM_RBUTTONDOWN && PointBelongsToTarget(data.pt)) rightDown = NewPending(data.pt, "right");
             else if (message == WM_LBUTTONUP) CompletePointer(leftDown, data.pt);
             else if (message == WM_RBUTTONUP) CompletePointer(rightDown, data.pt);
@@ -262,9 +277,16 @@ public static class AIWorkstationTeachRecorder
             KBDLLHOOKSTRUCT data = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
             Keys key = (Keys)data.vkCode;
             string safeKey = SafeRecordedKey(key);
-            if (safeKey != null)
+            string previewKey = SafePreviewKey(key);
+            if (safeKey != null || previewKey != null)
             {
-                RecordedEvent item = new RecordedEvent { type = "pressKey", atMs = Clock.ElapsedMilliseconds, key = safeKey, source = "keyboard-hook" };
+                lastKeyboardAtMs = Clock.ElapsedMilliseconds;
+                RecordedEvent item = new RecordedEvent {
+                    type = safeKey != null ? "pressKey" : "keyPreview",
+                    atMs = Clock.ElapsedMilliseconds,
+                    key = safeKey ?? previewKey,
+                    source = "keyboard-hook"
+                };
                 try
                 {
                     AutomationElement focused = AutomationElement.FocusedElement;
@@ -280,7 +302,7 @@ public static class AIWorkstationTeachRecorder
                     }
                 }
                 catch { }
-                AddEvent(item);
+                if (!item.sensitive || safeKey != null) AddEvent(item);
             }
         }
         return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
@@ -320,6 +342,32 @@ public static class AIWorkstationTeachRecorder
         }
         if (modifiers == Keys.None) return SafeNonTextKey(key);
         return null;
+    }
+
+    private static string SafePreviewKey(Keys key)
+    {
+        Keys modifiers = Control.ModifierKeys;
+        if ((modifiers & Keys.Control) == Keys.Control && key >= Keys.A && key <= Keys.Z) return "Ctrl+" + key.ToString();
+        if ((modifiers & Keys.Alt) == Keys.Alt && key >= Keys.A && key <= Keys.Z) return "Alt+" + key.ToString();
+        if ((modifiers & Keys.Shift) == Keys.Shift && key >= Keys.A && key <= Keys.Z) return "Shift+" + key.ToString();
+        if (key >= Keys.A && key <= Keys.Z) return key.ToString();
+        if (key >= Keys.D0 && key <= Keys.D9) return key.ToString().Substring(1);
+        if (key >= Keys.NumPad0 && key <= Keys.NumPad9) return "Num" + ((int)key - (int)Keys.NumPad0).ToString();
+        if (key == Keys.Space) return "Space";
+        return SafeNonTextKey(key);
+    }
+
+    private static void RecordPointerMove(POINT point)
+    {
+        long now = Clock.ElapsedMilliseconds;
+        int dx = hasLastMove ? point.X - lastMove.X : 100;
+        int dy = hasLastMove ? point.Y - lastMove.Y : 100;
+        if (hasLastMove && now - lastMoveAtMs < 40) return;
+        if (hasLastMove && dx * dx + dy * dy < 9) return;
+        hasLastMove = true;
+        lastMove = point;
+        lastMoveAtMs = now;
+        AddEvent(new RecordedEvent { type = "pointerMove", atMs = now, x = point.X, y = point.Y, source = "pointer-hook" });
     }
 
     private static PendingPointer NewPending(POINT point, string button)
@@ -363,15 +411,25 @@ public static class AIWorkstationTeachRecorder
     private static void CheckStop()
     {
         if (stopping) return;
+        WriteLiveSnapshot();
         if (File.Exists(config.stopPath) || Clock.ElapsedMilliseconds >= Math.Max(1000, config.maxDurationMs)) Stop();
     }
 
-    private static void Stop()
+    private static void WriteLiveSnapshot()
     {
-        stopping = true;
+        int count;
+        lock (Sync) count = Events.Count;
+        if (count == lastLiveEventCount) return;
+        WriteSnapshot(config.livePath, false);
+        lastLiveEventCount = count;
+    }
+
+    private static void WriteSnapshot(string outputPath, bool stopped)
+    {
+        if (String.IsNullOrEmpty(outputPath)) return;
         RecorderOutput output = new RecorderOutput {
             startedAt = startedAt,
-            stoppedAt = DateTime.UtcNow.ToString("o"),
+            stoppedAt = stopped ? DateTime.UtcNow.ToString("o") : null,
             targetWindowHandle = config.targetWindowHandle
         };
         lock (Sync)
@@ -380,7 +438,13 @@ public static class AIWorkstationTeachRecorder
             output.events.Sort(delegate(RecordedEvent a, RecordedEvent b) { return a.atMs.CompareTo(b.atMs); });
             output.warnings = new List<string>(Warnings);
         }
-        File.WriteAllText(config.outputPath, new JavaScriptSerializer().Serialize(output), new UTF8Encoding(false));
+        File.WriteAllText(outputPath, new JavaScriptSerializer().Serialize(output), new UTF8Encoding(false));
+    }
+
+    private static void Stop()
+    {
+        stopping = true;
+        WriteSnapshot(config.outputPath, true);
         context.ExitThread();
     }
 

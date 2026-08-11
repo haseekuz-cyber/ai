@@ -204,6 +204,19 @@ test('planner rejects a zero-distance drag', () => {
   }), /visible non-zero drag/);
 });
 
+test('planner preserves a semantic target hint for typeText', () => {
+  const proposal = normalizePlannerOutput({
+    action: {
+      type: 'typeText',
+      point: { x: 0.2, y: 0.1 },
+      text: '40',
+      targetHint: { name: 'Width', visibleText: '57.349 cm' }
+    },
+    confidence: 0.9
+  });
+  assert.deepEqual(proposal.action.targetHint, { name: 'Width', visibleText: '57.349 cm' });
+});
+
 test('inaccessible UIA surface preserves the semantic target for visual refinement', () => {
   const proposal = makeProposal({ targetHint: { name: 'Pointer tool', visibleText: 'Pointer' } });
   const result = normalizeAndGround({
@@ -345,6 +358,38 @@ test('accepted grounding calls the executor exactly once', async () => {
   assert.equal(calls, 1);
 });
 
+test('inaccessible UIA surface permits visual refinement of an identified text field', () => {
+  const proposal = makeProposal({
+    type: 'typeText',
+    point: pointForScreen(250, 100),
+    targetHint: { name: 'Width' },
+    text: '40'
+  });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [makeElement({
+      name: 'CorelDRAW',
+      className: 'MainWindow',
+      controlType: 'Window',
+      capabilities: []
+    })],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.reason, 'visual_text_refinement_required');
+  assert.deepEqual(result.grounding.targetHint, { name: 'Width' });
+});
+
+test('inaccessible UIA surface blocks unidentified typeText', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({ type: 'typeText', targetHint: null, text: '40' }),
+    elements: [makeElement({ controlType: 'Window', capabilities: [] })],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'no_editable_target');
+});
+
 test('verified visual grounding can execute exactly once', async () => {
   let calls = 0;
   const result = await executeGroundedAction({
@@ -360,4 +405,17 @@ test('verified visual grounding can execute exactly once', async () => {
   });
   assert.equal(result, 'visual-ok');
   assert.equal(calls, 1);
+});
+
+test('low-confidence visual text grounding is blocked', async () => {
+  await assert.rejects(() => executeGroundedAction({
+    action: { type: 'typeText' },
+    grounding: {
+      adjusted: true,
+      blocked: false,
+      reason: 'visual_text_target_refined',
+      confidence: 0.59
+    },
+    execute: async () => 'unexpected'
+  }), (error) => error.code === 'grounding_blocked');
 });

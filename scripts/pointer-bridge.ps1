@@ -267,10 +267,14 @@ try {
         'typeText' {
             $transport = Set-AccessibleValue $processId $request.point ([string]$request.text)
             if ($null -eq $transport) {
+                $fieldPoint = Convert-ClientPoint $inputHandle $request.point
+                Send-Click $inputHandle $fieldPoint 'left'
+                Start-Sleep -Milliseconds 80
+                [void](Send-SafeKey $inputHandle 'Ctrl+A')
                 foreach ($character in ([string]$request.text).ToCharArray()) {
                     [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0102, [UIntPtr]::new([uint64][int]$character), [IntPtr]::Zero)
                 }
-                $transport = [ordered]@{ transport = 'window-message'; pattern = 'char'; element = $null }
+                $transport = [ordered]@{ transport = 'window-message'; pattern = 'focus-selectAll-char'; element = $null }
             }
         }
         'pressKey' {

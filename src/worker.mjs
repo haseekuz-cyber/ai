@@ -15,6 +15,7 @@ import { centerOfBounds, moveVirtualPointer, startVirtualPointer } from './virtu
 import { createBoundedPointerRequest, normalizePointerAction, runPointerAction } from './pointer-bridge.mjs';
 import { analyzeImageWithLmStudio, analyzeTextWithLmStudio, getLmStudioStatus, normalizeVisionPrompt } from './lmstudio-client.mjs';
 import {
+  FIELD_REFINER_SYSTEM_PROMPT,
   FOCUSED_VALIDATOR_SYSTEM_PROMPT,
   PLANNER_SYSTEM_PROMPT,
   POINTER_REFINER_SYSTEM_PROMPT,
@@ -30,6 +31,7 @@ import {
 import { detectTelegramBadges } from './telegram-audit.mjs';
 import {
   buildSkillFromRecording,
+  normalizePointToWindow,
   normalizeTeachingText,
   pointerActionToTeachingEvent,
   startTeachingRecorder,
@@ -50,6 +52,15 @@ import { sameWindowContext } from './window-context.mjs';
 import { normalizeSkillRecommendation, publicSkillCandidate, SKILL_ROUTER_SYSTEM_PROMPT } from './skill-router.mjs';
 import { waitForSettledObservation } from './observation-settling.mjs';
 import { cropImageRegion } from './image-region.mjs';
+import {
+  appendStepFeedback,
+  buildPlanFeedback,
+  buildStepFeedback,
+  ratedStepsForPrompt,
+  readRatedSteps
+} from './feedback-store.mjs';
+import { buildInterfaceContext } from './interface-context.mjs';
+import { buildBoundedPlannerPrompt } from './planner-prompt.mjs';
 
 let diagnostics;
 let diagnosticsError;
@@ -92,27 +103,43 @@ async function captureWindowAfterSettling({ windowHandle, beforeObservation, lab
   });
 }
 
-async function refinePlannedClick({ planned, observation, instruction }) {
+async function refinePlannedTarget({ planned, observation, instruction }) {
   const action = planned.proposal.action;
-  if (!['click', 'doubleClick'].includes(action.type) || planned.grounding?.adjusted) {
+  if (!['click', 'doubleClick', 'typeText'].includes(action.type) || planned.grounding?.adjusted) {
     return { planned, visualRefinement: null };
   }
 
-  const visualRefinementRequired = planned.grounding?.reason === 'visual_refinement_required';
+  const textFieldRefinement = action.type === 'typeText' &&
+    planned.grounding?.reason === 'visual_text_refinement_required';
+  const visualRefinementRequired = planned.grounding?.reason === 'visual_refinement_required' ||
+    textFieldRefinement;
 
   const width = observation.bounds.width;
   const height = observation.bounds.height;
   const coarsePoint = { x: action.point.x, y: action.point.y };
   const cropPath = path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-pointer-crop.png`);
+  const fieldPurpose = `${planned.proposal.reason} ${JSON.stringify(action.targetHint || {})}`;
+  const selectedObjectSizeField = textFieldRefinement &&
+    /(ширин|высот|размер|width|height|object size)/i.test(fieldPurpose);
+  const broadTopFieldSearch = textFieldRefinement &&
+    (coarsePoint.y <= 0.25 || selectedObjectSizeField);
+  const cropWidth = broadTopFieldSearch ? Math.min(1_200, width) : 220;
+  const cropHeight = broadTopFieldSearch ? Math.min(260, height) : 220;
+  const cropCenterX = broadTopFieldSearch
+    ? (selectedObjectSizeField || coarsePoint.x < 0.5 ? cropWidth / 2 : width - cropWidth / 2)
+    : coarsePoint.x * Math.max(0, width - 1);
+  const cropCenterY = broadTopFieldSearch
+    ? cropHeight / 2
+    : coarsePoint.y * Math.max(0, height - 1);
   const crop = await cropImageRegion({
     scriptPath: config.imageRegionScript,
     inputPath: observation.outputPath,
     outputPath: cropPath,
-    centerX: coarsePoint.x * Math.max(0, width - 1),
-    centerY: coarsePoint.y * Math.max(0, height - 1),
-    width: 220,
-    height: 220,
-    scale: 3
+    centerX: cropCenterX,
+    centerY: cropCenterY,
+    width: cropWidth,
+    height: cropHeight,
+    scale: broadTopFieldSearch ? 2 : 3
   });
 
   try {
@@ -120,8 +147,10 @@ async function refinePlannedClick({ planned, observation, instruction }) {
       baseUrl: config.lmStudioBaseUrl,
       model: config.lmStudioModel,
       imagePath: crop.outputPath,
-      systemPrompt: POINTER_REFINER_SYSTEM_PROMPT,
-      prompt: `Задача: ${instruction}\nНужное действие: ${planned.proposal.reason}\nЦелевой элемент: ${JSON.stringify(action.targetHint || {})}\nОжидаемый результат: ${planned.proposal.expectedResult}\nНайди точный центр только нужного элемента в увеличенном фрагменте.`,
+      systemPrompt: textFieldRefinement ? FIELD_REFINER_SYSTEM_PROMPT : POINTER_REFINER_SYSTEM_PROMPT,
+      prompt: textFieldRefinement
+        ? `Задача: ${instruction}\nНазначение поля: ${planned.proposal.reason}\nЦелевое поле: ${JSON.stringify(action.targetHint || {})}\nТекст для ввода: ${action.text}\nНайди точный центр существующего редактируемого поля, чья роль соответствует назначению. Не принимай желаемое новое значение за текущий видимый текст и не выбирай другое числовое поле.${selectedObjectSizeField ? ' Это поле геометрического размера выбранного объекта; не выбирай X, Y, толщину контура, проценты, угол или поле другой роли.' : ''}`
+        : `Задача: ${instruction}\nНужное действие: ${planned.proposal.reason}\nЦелевой элемент: ${JSON.stringify(action.targetHint || {})}\nОжидаемый результат: ${planned.proposal.expectedResult}\nНайди точный центр только нужного элемента в увеличенном фрагменте.`,
       maxOutputTokens: 400
     });
     const refinement = normalizePointerRefinement(refinementVision.analysis, crop, observation.bounds);
@@ -152,7 +181,7 @@ async function refinePlannedClick({ planned, observation, instruction }) {
       ...planned.grounding,
       adjusted: true,
       blocked: false,
-      reason: 'visual_target_refined',
+      reason: textFieldRefinement ? 'visual_text_target_refined' : 'visual_target_refined',
       confidence: combinedConfidence,
       safePoint: refinement.point,
       pointMethod: 'vision_refined_point'
@@ -289,6 +318,38 @@ function publicMission(mission) {
   };
 }
 
+function publicTeachingEvent(event, bounds) {
+  const item = {
+    type: event.type,
+    atMs: Math.max(0, Math.round(Number(event.atMs) || 0))
+  };
+  if (['pointerMove', 'click', 'doubleClick', 'scroll', 'drag'].includes(event.type)) {
+    item.point = normalizePointToWindow({ x: event.x, y: event.y }, bounds);
+  }
+  if (event.type === 'drag') {
+    item.to = normalizePointToWindow({ x: event.toX, y: event.toY }, bounds);
+  }
+  if (event.type === 'pressKey' || event.type === 'keyPreview') item.key = String(event.key || '').slice(0, 40);
+  if (event.type === 'click' || event.type === 'doubleClick' || event.type === 'drag') item.button = event.button === 'right' ? 'right' : 'left';
+  if (event.type === 'scroll') item.delta = Number(event.delta) || 0;
+  if (event.type === 'typeText') item.textChanged = true;
+  return item;
+}
+
+async function readTeachingPreview(session) {
+  try {
+    const recording = JSON.parse(await fs.readFile(session.livePath, 'utf8'));
+    const events = [...(recording.events ?? []), ...(session.injectedEvents ?? [])]
+      .sort((left, right) => Number(left.atMs) - Number(right.atMs));
+    return {
+      eventCount: events.length,
+      events: events.slice(-800).map((event) => publicTeachingEvent(event, session.window.bounds))
+    };
+  } catch {
+    return { eventCount: 0, events: [] };
+  }
+}
+
 function publicLearnedStepForProcess(step, processName) {
   return {
     ...publicLearnedStep(step),
@@ -392,6 +453,52 @@ function validateActionRequest(input) {
   return input;
 }
 
+function taskTokens(text) {
+  return new Set(String(text || '').toLowerCase().match(/[a-zа-яё0-9]{3,}/gi) || []);
+}
+
+function learnedDemonstrationsForPrompt(skills, instruction, processName) {
+  const wanted = taskTokens(instruction);
+  const relevant = skills
+    .filter((skill) => String(skill.application?.processName || '').toLowerCase() === String(processName || '').toLowerCase())
+    .map((skill) => {
+      const known = taskTokens(`${skill.name} ${skill.instruction}`);
+      const score = [...wanted].filter((token) => known.has(token)).length;
+      return { skill, score };
+    })
+    .sort((left, right) => right.score - left.score || String(right.skill.createdAt).localeCompare(String(left.skill.createdAt)))
+    .slice(0, 1)
+    .map(({ skill }) => {
+      const trajectory = skill.demonstration?.trajectory || [];
+      const stride = Math.max(1, Math.ceil(trajectory.length / 16));
+      return {
+        shownTask: skill.instruction,
+        logicalSteps: skill.steps.slice(0, 10).map((step) => ({
+          type: step.type,
+          target: step.target || null,
+          point: step.point || null,
+          from: step.from || null,
+          to: step.to || null,
+          key: step.key || null,
+          text: step.text || null
+        })),
+        trajectoryEvidence: trajectory.filter((_, index) => index % stride === 0).slice(0, 16),
+        keyboardEvidence: (skill.demonstration?.keyboard || []).slice(-16)
+      };
+    });
+  if (!relevant.length) return '';
+  const prefix = '\nДемонстрация пользователя в этой программе: ';
+  const suffix = '\nПойми цель движений и клавиш. Точную траекторию сохраняй только там, где она влияет на результат.';
+  const example = relevant[0];
+  while (prefix.length + JSON.stringify([example]).length + suffix.length > 1_000) {
+    if (example.trajectoryEvidence.length) example.trajectoryEvidence.pop();
+    else if (example.keyboardEvidence.length) example.keyboardEvidence.pop();
+    else if (example.logicalSteps.length > 1) example.logicalSteps.pop();
+    else return '';
+  }
+  return `${prefix}${JSON.stringify([example])}${suffix}`;
+}
+
 async function createWindowActionPlan({ windowHandle, instruction, mission = null }) {
   const inspected = await runUiAutomation(
     config.uiaScript,
@@ -411,21 +518,39 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     windowHandle,
     outputPath
   });
-  const history = mission?.history.slice(-8).map((item) => ({
+  const history = mission?.history.slice(-4).map((item) => ({
     step: item.step,
     action: item.action,
     validation: item.validation,
-    expectedResult: item.expectedResult
+    expectedResult: item.expectedResult,
+    humanFeedback: item.humanFeedback || null
   })) ?? [];
   const historyPrompt = history.length
     ? `\nПредыдущие проверенные шаги этой задачи: ${JSON.stringify(history)}`
     : '';
+  const ratedSteps = await readRatedSteps(config.feedbackLogPath, {
+    processName: inspected.window.processName,
+    limit: 8
+  });
+  const interfacePrompt = buildInterfaceContext(inspected.elements, observation.bounds, { limit: 80, maxChars: 1_600 });
+  const feedbackPrompt = ratedStepsForPrompt(ratedSteps);
+  const learnedSkills = await loadAllSkills();
+  const demonstrationPrompt = learnedDemonstrationsForPrompt(
+    learnedSkills,
+    instruction,
+    inspected.window.processName
+  );
+  const planningContextParts = [historyPrompt, interfacePrompt, demonstrationPrompt, feedbackPrompt];
   let vision = await analyzeImageWithLmStudio({
     baseUrl: config.lmStudioBaseUrl,
     model: config.lmStudioModel,
     imagePath: observation.outputPath,
     systemPrompt: PLANNER_SYSTEM_PROMPT,
-    prompt: `Задача пользователя: ${instruction}${historyPrompt}\nПредложи только следующий видимый шаг по свежему снимку. Не повторяй успешный шаг, если его результат всё ещё виден. Если свежий снимок противоречит истории, сначала восстанови необходимое состояние. Для создания или изменения фигуры на холсте используй drag, а не click по пустой области. Если предыдущий шаг не прошёл проверку, не повторяй ту же координату или метод.`,
+    prompt: buildBoundedPlannerPrompt({
+      instruction,
+      contextParts: planningContextParts,
+      directive: 'Предложи только следующий видимый шаг по свежему снимку. Не повторяй успешный шаг, если его результат всё ещё виден. Если свежий снимок противоречит истории, сначала восстанови необходимое состояние. Для создания или изменения фигуры на холсте используй drag, а не click по пустой области. Если предыдущий шаг не прошёл проверку, не повторяй ту же координату или метод.'
+    }),
     maxOutputTokens: 1_200
   });
 
@@ -445,25 +570,48 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     });
   };
 
-  let planned = normalizeAndGroundStep(vision);
-  let refined;
-  let visualRefinement = null;
+  let planned;
   let recoveryAttempts = 0;
   try {
-    refined = await refinePlannedClick({ planned, observation, instruction });
+    planned = normalizeAndGroundStep(vision);
   } catch (error) {
-    if (error.abortReason !== 'visual_target_not_verified') throw error;
+    if (error.code !== 'invalid_local_plan') throw error;
     recoveryAttempts = 1;
     vision = await analyzeImageWithLmStudio({
       baseUrl: config.lmStudioBaseUrl,
       model: config.lmStudioModel,
       imagePath: observation.outputPath,
       systemPrompt: PLANNER_SYSTEM_PROMPT,
-      prompt: `Задача пользователя: ${instruction}${historyPrompt}\nПредыдущий предложенный click отклонён: целевой элемент не виден рядом с точкой ${JSON.stringify(error.plannedProposal?.action?.point || null)}. Заново проверь свежий снимок. Если нужно рисовать или изменять фигуру на холсте, ОБЯЗАТЕЛЬНО верни action.type=drag. Точки from и to должны быть разными, видимыми и находиться на рабочей области; расстояние между ними должно быть не менее 5% размера окна. Сначала создай видимую фигуру, а точные размеры задай следующим шагом через поля размеров. Если состояние из успешного прошлого шага больше не видно, сначала восстанови его. Click по пустому Canvas запрещён. Предложи только один следующий шаг.`,
+      prompt: buildBoundedPlannerPrompt({
+        instruction,
+        contextParts: planningContextParts,
+        directive: `Предыдущий ответ отклонён как недопустимый: ${error.message}. Используй только реально видимые элементы свежего снимка и верни все обязательные координаты. Не выдумывай кнопку или панель свойств. Если объект выбран и нужно задать точный размер, верни typeText прямо в видимое числовое поле ширины или высоты верхней панели: point внутри поля, targetHint с ролью поля, text только с числом без единицы измерения. Предложи один следующий шаг.`
+      }),
       maxOutputTokens: 1_200
     });
     planned = normalizeAndGroundStep(vision);
-    refined = await refinePlannedClick({ planned, observation, instruction });
+  }
+  let refined;
+  let visualRefinement = null;
+  try {
+    refined = await refinePlannedTarget({ planned, observation, instruction });
+  } catch (error) {
+    if (error.abortReason !== 'visual_target_not_verified') throw error;
+    recoveryAttempts += 1;
+    vision = await analyzeImageWithLmStudio({
+      baseUrl: config.lmStudioBaseUrl,
+      model: config.lmStudioModel,
+      imagePath: observation.outputPath,
+      systemPrompt: PLANNER_SYSTEM_PROMPT,
+      prompt: buildBoundedPlannerPrompt({
+        instruction,
+        contextParts: planningContextParts,
+        directive: `Предыдущее предложенное действие отклонено: целевой элемент не виден рядом с точкой ${JSON.stringify(error.plannedProposal?.action?.point || null)}. Заново проверь свежий снимок и не выдумывай кнопку или панель, которой нет на экране. Если выбранный объект уже виден и нужно изменить его размер, используй typeText прямо в реально видимом поле ширины или высоты на панели свойств; укажи targetHint с ролью поля, point внутри поля и только числовой text без единицы измерения. Если нужно создать фигуру на холсте, ОБЯЗАТЕЛЬНО верни action.type=drag с разными видимыми from и to на рабочей области. Click по пустому Canvas запрещён. Предложи только один следующий шаг.`
+      }),
+      maxOutputTokens: 1_200
+    });
+    planned = normalizeAndGroundStep(vision);
+    refined = await refinePlannedTarget({ planned, observation, instruction });
   }
   planned = refined.planned;
   visualRefinement = refined.visualRefinement;
@@ -475,11 +623,15 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
       model: config.lmStudioModel,
       imagePath: observation.outputPath,
       systemPrompt: PLANNER_SYSTEM_PROMPT,
-      prompt: `Задача пользователя: ${instruction}${historyPrompt}\nЗапрещено повторять проваленное действие: ${JSON.stringify(repeatedFailure.action)}. Выбери другую точку минимум в 1% размера окна или другой метод. Предложи только один следующий видимый шаг.`,
+      prompt: buildBoundedPlannerPrompt({
+        instruction,
+        contextParts: planningContextParts,
+        directive: `Запрещено повторять проваленное действие: ${JSON.stringify(repeatedFailure.action)}. Выбери другую точку минимум в 1% размера окна или другой метод. Предложи только один следующий видимый шаг.`
+      }),
       maxOutputTokens: 1_200
     });
     planned = normalizeAndGroundStep(vision);
-    refined = await refinePlannedClick({ planned, observation, instruction });
+    refined = await refinePlannedTarget({ planned, observation, instruction });
     planned = refined.planned;
     visualRefinement = refined.visualRefinement;
     repeatedFailure = findRepeatedFailedAction(planned.proposal.action, history);
@@ -1239,6 +1391,14 @@ const server = http.createServer(async (request, response) => {
 
       plan.status = 'executed';
       plan.executedAt = new Date().toISOString();
+      plan.validation = {
+        success: validation.success,
+        evidence: validation.evidence,
+        confidence: validation.confidence,
+        limitations: validation.limitations,
+        source: validationSource
+      };
+      plan.afterScreenshot = afterObservation.outputPath;
       const mission = plan.missionId ? missions.get(plan.missionId) : null;
       if (mission) {
         mission.stepCount += 1;
@@ -1287,7 +1447,82 @@ const server = http.createServer(async (request, response) => {
       });
     }
 
+    if (request.method === 'POST' && ['/feedback/rate', '/feedback/like'].includes(url.pathname)) {
+      const input = await readJson(request);
+      const rating = url.pathname === '/feedback/like' ? 'positive' : input.rating;
+      if (!['positive', 'negative'].includes(rating)) {
+        return sendJson(response, 400, { error: 'invalid_rating', message: 'rating must be positive or negative.' });
+      }
+
+      let record;
+      let mission = null;
+      let run = null;
+      if (typeof input.planId === 'string' && input.planId) {
+        const plan = actionPlans.get(input.planId);
+        if (!plan) {
+          return sendJson(response, 404, { error: 'plan_not_found', message: 'The completed step expired or does not exist.' });
+        }
+        if (plan.status !== 'executed') {
+          return sendJson(response, 409, { error: 'step_not_executed', message: 'Only a completed step can be rated.' });
+        }
+        record = buildPlanFeedback({ plan, rating, feedbackId: randomUUID() });
+        mission = plan.missionId ? missions.get(plan.missionId) : null;
+        if (mission?.history.length) {
+          mission.history[mission.history.length - 1].humanFeedback = rating;
+          if (mission.status !== 'limit_reached') mission.status = rating === 'positive' ? 'active' : 'needs_review';
+        }
+      } else if (typeof input.runId === 'string' && input.runId) {
+        pruneSkillRuns();
+        run = skillRuns.get(input.runId);
+        if (!run) return sendJson(response, 404, { error: 'skill_run_not_found', message: 'Skill run expired or does not exist.' });
+        if (!run.lastExecution || Number(input.executedStepIndex) !== run.lastExecution.executedStepIndex) {
+          return sendJson(response, 409, { error: 'skill_step_not_executed', message: 'Only the latest executed skill step can be rated.' });
+        }
+        const execution = run.lastExecution;
+        record = buildStepFeedback({
+          feedbackId: randomUUID(),
+          rating,
+          runId: run.runId,
+          skillId: run.skill.skillId,
+          stepIndex: execution.executedStepIndex,
+          instruction: run.skill.instruction,
+          application: execution.window || run.skill.application,
+          action: publicLearnedStep(execution.step),
+          reason: `Demonstrated step ${execution.executedStepIndex + 1}`,
+          automatedValidation: execution.validation
+        });
+        run.lastExecution.humanFeedback = rating;
+      } else {
+        return sendJson(response, 400, { error: 'invalid_feedback_target', message: 'planId or runId is required.' });
+      }
+
+      const saved = await appendStepFeedback(config.feedbackLogPath, record);
+      await audit('feedback.step_rated', {
+        feedbackId: saved.record.feedbackId,
+        rating,
+        planId: saved.record.planId,
+        missionId: saved.record.missionId,
+        runId: saved.record.runId,
+        skillId: saved.record.skillId,
+        stepIndex: saved.record.stepIndex,
+        processName: saved.record.application?.processName || null,
+        created: saved.created
+      });
+      return sendJson(response, saved.created ? 201 : 200, {
+        learned: true,
+        rating,
+        created: saved.created,
+        feedback: saved.record,
+        mission: publicMission(mission),
+        skillRun: run ? { runId: run.runId, status: run.status, stepIndex: run.stepIndex } : null,
+        message: rating === 'positive'
+          ? 'The successful step will be reused as compact experience.'
+          : 'The failed step will be avoided or changed in future plans.'
+      });
+    }
+
     if (request.method === 'GET' && url.pathname === '/teach/status') {
+      const preview = teachingSession ? await readTeachingPreview(teachingSession) : null;
       return sendJson(response, 200, {
         active: Boolean(teachingSession),
         session: teachingSession ? {
@@ -1297,7 +1532,8 @@ const server = http.createServer(async (request, response) => {
           startedAt: teachingSession.startedAt,
           expiresAt: teachingSession.expiresAt,
           window: teachingSession.window,
-          recorderProcessId: teachingSession.recorder.processId
+          recorderProcessId: teachingSession.recorder.processId,
+          preview
         } : null
       });
     }
@@ -1338,6 +1574,7 @@ const server = http.createServer(async (request, response) => {
         outputPath: beforePath
       });
       const outputPath = path.join(sessionDirectory, 'events.json');
+      const livePath = path.join(sessionDirectory, 'live.json');
       const readyPath = path.join(sessionDirectory, 'ready');
       const stopPath = path.join(sessionDirectory, 'stop');
       const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
@@ -1347,6 +1584,7 @@ const server = http.createServer(async (request, response) => {
           targetWindowHandle: input.windowHandle,
           allowedBounds: display.bounds,
           outputPath,
+          livePath,
           readyPath,
           stopPath,
           maxDurationMs
@@ -1366,6 +1604,7 @@ const server = http.createServer(async (request, response) => {
         expiresAt: new Date(now + maxDurationMs).toISOString(),
         sessionDirectory,
         outputPath,
+        livePath,
         readyPath,
         stopPath,
         beforeObservation,
@@ -1703,6 +1942,12 @@ const server = http.createServer(async (request, response) => {
       const executedStepIndex = run.stepIndex;
       run.stepIndex += 1;
       run.status = run.stepIndex >= run.skill.steps.length ? 'complete' : 'ready';
+      run.lastExecution = {
+        executedStepIndex,
+        step,
+        validation,
+        window: inspected.window
+      };
       await audit('action.executed', {
         channel: 'learned-skill', runId: run.runId, skillId: run.skill.skillId,
         stepIndex: executedStepIndex, action: step.type, key: step.type === 'pressKey' ? step.key : null,

@@ -118,7 +118,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === 'GET' && url.pathname === '/api/uia/windows') {
       try {
-        const worker = await callWorker('/uia/windows');
+        const worker = await callWorker('/uia/windows', { timeoutMs: 30_000 });
         return sendJson(response, worker.status, worker.value);
       } catch (error) {
         return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
@@ -224,6 +224,30 @@ const server = http.createServer(async (request, response) => {
           method: 'POST',
           body: JSON.stringify(input),
           timeoutMs: 240_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/feedback/like') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/feedback/like', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 15_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/feedback/rate') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/feedback/rate', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 15_000
         });
         return sendJson(response, worker.status, worker.value);
       } catch (error) {

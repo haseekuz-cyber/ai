@@ -42,6 +42,7 @@ export const config = Object.freeze({
   teachingDirectory: process.env.AI_WORKSTATION_TEACHING || path.resolve(moduleDirectory, '..', 'artifacts', 'teaching'),
   skillsDirectory: process.env.AI_WORKSTATION_SKILLS || path.resolve(moduleDirectory, '..', 'artifacts', 'skills'),
   auditLogPath: process.env.AI_WORKSTATION_AUDIT_LOG || path.resolve(moduleDirectory, '..', 'artifacts', 'logs', 'actions.jsonl'),
+  feedbackLogPath: process.env.AI_WORKSTATION_FEEDBACK_LOG || path.resolve(moduleDirectory, '..', 'artifacts', 'learning', 'approved-steps.jsonl'),
   safetyStatePath: process.env.AI_WORKSTATION_SAFETY_STATE || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety.json'),
   safetyHotkeyReadyPath: process.env.AI_WORKSTATION_SAFETY_HOTKEY_READY || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety-hotkey.ready'),
   assignedDisplay: process.env.AI_WORKSTATION_DISPLAY || null,

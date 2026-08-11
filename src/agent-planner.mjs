@@ -1,8 +1,8 @@
 const supportedActions = new Set(['click', 'doubleClick', 'scroll', 'drag', 'typeText', 'wait', 'done']);
 const riskLevels = new Set(['read_only', 'local_change', 'external_effect', 'dangerous']);
 
-export const PLANNER_SYSTEM_PROMPT = `You are the local visual planner for a Windows AI employee.
-Look only at the supplied screenshot and propose exactly one next UI action toward the user's instruction.
+export const PLANNER_SYSTEM_PROMPT = `You are the local interface planner for a universal Windows AI employee.
+Use the supplied fresh screenshot together with any structured accessibility map and propose exactly one next UI action toward the user's instruction.
 Do not claim that the action has already happened. Return JSON only, without markdown fences:
 {
   "observation":"short Russian description of the current visible state",
@@ -23,10 +23,13 @@ Do not claim that the action has already happened. Return JSON only, without mar
 }
 Coordinates are normalized to the screenshot from 0 to 1. Include only fields needed by the chosen action.
 For click/doubleClick actions, ALWAYS include targetHint with automationId, name, or visibleText to identify the target. controlType may be added as a constraint, but controlType alone is not an identity.
+For typeText actions, include targetHint with the visible field name, role, or current visible value. The point must be inside that visible input field.
 Use done when the instruction is visibly complete. Use wait only for a visible loading state.
 Treat the fresh screenshot as the source of truth. A previous successful step may be repeated only when its visible result is no longer present and the state must be restored.
+Prefer a semantic target from the structured interface map when one exists. Use visual coordinates only for custom canvases or targets absent from that map. Never assume that two applications expose the same controls.
 When a drawing or shape tool is active and the task requires creating or resizing something on a canvas, use drag with visible start and end points. Do not use click on an empty canvas as a substitute for a drawing gesture.
 For drag, from and to must be visibly different points. When creating a shape, first create a visible non-zero shape; exact dimensions can be set in a later step through visible size fields.
+When a selected object exposes numeric size fields in a visible property bar, type directly into the width or height field. Do not invent a generic properties button or dialog. If the field already shows a unit, enter only the numeric value.
 Use click only for a discrete visible control, object, or position that can be verified locally.
 Opening a chat, sending a message, publishing, purchasing, deleting, overwriting files, changing account/security settings, or confirming a dialog is external_effect or dangerous.
 If a target is not clearly visible, return wait or done with low confidence instead of guessing.`;
@@ -53,6 +56,17 @@ Locate the exact center of the requested visible control. Return JSON only:
   "evidence":"short Russian description"
 }
 Coordinates are normalized to this cropped image from 0 to 1. If the requested control is not clearly visible, set targetVisible to false and omit point. Never choose a different control.`;
+
+export const FIELD_REFINER_SYSTEM_PROMPT = `You locate a requested visible input field in an enlarged crop of a desktop user interface.
+Identify the field by its role, current value, nearby icons, and paired fields even when no text label is shown. The desired new value is not expected to be visible yet.
+Return JSON only:
+{
+  "targetVisible":true,
+  "point":{"x":0.0,"y":0.0},
+  "confidence":0.0,
+  "evidence":"short Russian description"
+}
+Coordinates are normalized to this cropped image from 0 to 1. Never choose a different numeric field. If the requested field is not clearly visible, set targetVisible to false and omit point.`;
 
 export const FOCUSED_VALIDATOR_SYSTEM_PROMPT = `You are a focused visual validator for a Windows AI employee.
 The supplied image is an enlarged crop around the exact click point after the action.
@@ -123,22 +137,26 @@ export function normalizePlannerOutput(value, screenshotBounds = null) {
   }
   if (type === 'wait') action.durationMs = Math.min(Math.max(Math.round(finite(rawAction.durationMs ?? 750, 'action.durationMs')), 50), 5_000);
 
-  if (['click', 'doubleClick'].includes(type)) {
+  if (['click', 'doubleClick', 'typeText'].includes(type)) {
     const rawHint = rawAction.targetHint;
-    if (!rawHint || typeof rawHint !== 'object' || Array.isArray(rawHint)) {
+    const validRawHint = rawHint && typeof rawHint === 'object' && !Array.isArray(rawHint);
+    if (!validRawHint && ['click', 'doubleClick'].includes(type)) {
       throw new TypeError('action.targetHint is required for click actions.');
     }
-    const hintKeys = ['automationId', 'name', 'controlType', 'visibleText'];
-    const validHint = {};
-    for (const key of hintKeys) {
-      if (typeof rawHint[key] === 'string' && rawHint[key].trim().length > 0) {
-        validHint[key] = rawHint[key].trim();
+    if (validRawHint) {
+      const hintKeys = ['automationId', 'name', 'controlType', 'visibleText'];
+      const validHint = {};
+      for (const key of hintKeys) {
+        if (typeof rawHint[key] === 'string' && rawHint[key].trim().length > 0) {
+          validHint[key] = rawHint[key].trim();
+        }
       }
+      if (!['automationId', 'name', 'visibleText'].some((key) => validHint[key]) &&
+          ['click', 'doubleClick'].includes(type)) {
+        throw new TypeError('action.targetHint requires automationId, name, or visibleText.');
+      }
+      if (Object.keys(validHint).length > 0) action.targetHint = validHint;
     }
-    if (!['automationId', 'name', 'visibleText'].some((key) => validHint[key])) {
-      throw new TypeError('action.targetHint requires automationId, name, or visibleText.');
-    }
-    action.targetHint = validHint;
   }
 
   const risk = value.risk && typeof value.risk === 'object' ? value.risk : {};

@@ -85,10 +85,23 @@ export function pointerActionToTeachingEvent({ action, elements = [], atMs = 0 }
 
 function collapseRecordedEvents(events) {
   const collapsed = [];
-  for (const event of [...events].sort((left, right) => Number(left.atMs) - Number(right.atMs))) {
+  const ordered = [...events].sort((left, right) => Number(left.atMs) - Number(right.atMs));
+  const keyboardEvents = ordered.filter((event) => ['pressKey', 'keyPreview'].includes(event.type));
+  const logicalEvents = ordered.filter((event) => {
+    if (['pointerMove', 'keyPreview'].includes(event.type)) return false;
+    if (event.type !== 'typeText' || event.source !== 'uia-event') return true;
+    return keyboardEvents.some((keyEvent) => {
+      const elapsed = Number(event.atMs) - Number(keyEvent.atMs);
+      if (elapsed < 0 || elapsed > 1500) return false;
+      if (event.automationId && keyEvent.automationId) return event.automationId === keyEvent.automationId;
+      return true;
+    });
+  });
+  for (const event of logicalEvents) {
     const previous = collapsed.at(-1);
     if (event.type === 'typeText' && previous?.type === 'typeText' &&
-        previous.automationId === event.automationId && previous.name === event.name) {
+        ((event.automationId && previous.automationId && previous.automationId === event.automationId) ||
+         (!event.automationId && !previous.automationId && previous.name === event.name))) {
       collapsed[collapsed.length - 1] = event;
       continue;
     }
@@ -106,6 +119,36 @@ function collapseRecordedEvents(events) {
     collapsed.push(event);
   }
   return collapsed;
+}
+
+export function summarizeDemonstration(recording, bounds, maxTrajectoryPoints = 500) {
+  const pointerEvents = (recording?.events ?? []).filter((event) =>
+    ['pointerMove', 'click', 'doubleClick', 'drag', 'scroll'].includes(event.type) &&
+    Number.isFinite(Number(event.x)) && Number.isFinite(Number(event.y))
+  );
+  const stride = Math.max(1, Math.ceil(pointerEvents.length / maxTrajectoryPoints));
+  const trajectory = pointerEvents
+    .filter((_, index) => index % stride === 0 || index === pointerEvents.length - 1)
+    .map((event) => ({
+      type: event.type,
+      atMs: Math.max(0, Math.round(Number(event.atMs) || 0)),
+      point: normalizePointToWindow({ x: event.x, y: event.y }, bounds),
+      ...(event.type === 'drag' ? { to: normalizePointToWindow({ x: event.toX, y: event.toY }, bounds) } : {})
+    }));
+  const keyboard = (recording?.events ?? [])
+    .filter((event) => ['pressKey', 'keyPreview'].includes(event.type) && !event.sensitive && event.key)
+    .slice(-300)
+    .map((event) => ({
+      type: event.type,
+      atMs: Math.max(0, Math.round(Number(event.atMs) || 0)),
+      key: String(event.key).slice(0, 40)
+    }));
+  return {
+    eventCount: recording?.events?.length ?? 0,
+    trajectory,
+    keyboard,
+    interpretationRule: 'The trajectory is evidence of intent. Adapt it to the current layout and use a shorter safe method when the exact path is not essential.'
+  };
 }
 
 export function buildSkillFromRecording({ skillId, name, instruction, window, recording, elements = [] }) {
@@ -168,6 +211,7 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       defaultRequiresConfirmation: true,
       passwordValuesStored: false
     },
+    demonstration: summarizeDemonstration(recording, window.bounds),
     steps,
     warnings: [...new Set(warnings)]
   };

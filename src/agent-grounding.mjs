@@ -250,6 +250,21 @@ function groundTextInput({ proposal, elements, windowBounds }) {
     };
   }
   if (hits.length > 1) return blockedResult(proposal, 'ambiguous_editable_targets');
+  const targetHint = proposal.action.targetHint || proposal.targetHint;
+  const hasIdentity = targetHint && ['automationId', 'name', 'visibleText']
+    .some((field) => cleanText(targetHint[field]));
+  const inspectedButInaccessible = elements.length > 0 && !elements.some((element) => isEditable(element));
+  if (editable.length === 0 && inspectedButInaccessible && hasIdentity) {
+    const grounding = {
+      adjusted: false,
+      blocked: false,
+      reason: 'visual_text_refinement_required',
+      targetHint,
+      originalPoint: proposal.action.point,
+      confidence: 0
+    };
+    return { proposal, grounding, blocked: false };
+  }
   if (editable.length !== 1) {
     return blockedResult(proposal, editable.length ? 'ambiguous_editable_targets' : 'no_editable_target');
   }
@@ -357,6 +372,12 @@ export async function executeGroundedAction({ action, grounding, execute }) {
   if (['click', 'doubleClick'].includes(action?.type) &&
       Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD) {
     const error = new Error('Grounding confidence is below the execution threshold.');
+    error.code = 'grounding_blocked';
+    throw error;
+  }
+  if (action?.type === 'typeText' && grounding.reason === 'visual_text_target_refined' &&
+      Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD) {
+    const error = new Error('Visual text-field confidence is below the execution threshold.');
     error.code = 'grounding_blocked';
     throw error;
   }

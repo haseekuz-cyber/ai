@@ -1,66 +1,43 @@
 const $ = (selector) => document.querySelector(selector);
 
 const statusDot = $('#status-dot');
-const statusTitle = $('#status-title');
-const statusDetail = $('#status-detail');
-const result = $('#result');
-const prompt = $('#prompt');
-const mode = $('#mode');
-const ownerSession = $('#owner-session');
-const workerSession = $('#worker-session');
-const controlMethod = $('#control-method');
-const isolationChecks = $('#isolation-checks');
+const statusText = $('#status-text');
+const safetyToggle = $('#safety-toggle');
 const windowSelect = $('#window-select');
-const inspectButton = $('#inspect-window');
-const analyzeButton = $('#analyze-window');
-const auditTelegramButton = $('#audit-telegram');
-const elementList = $('#element-list');
-const displayDetail = $('#display-detail');
-const planNextButton = $('#plan-next');
-const executePlanButton = $('#execute-plan');
-const cancelMissionButton = $('#cancel-mission');
-const agentPlanStatus = $('#agent-plan-status');
-const skillName = $('#skill-name');
-const startTeachingButton = $('#start-teaching');
-const stopTeachingButton = $('#stop-teaching');
-const cancelTeachingButton = $('#cancel-teaching');
-const teachingStatus = $('#teaching-status');
-const skillSelect = $('#skill-select');
-const refreshSkillsButton = $('#refresh-skills');
-const recommendSkillButton = $('#recommend-skill');
-const prepareSkillButton = $('#prepare-skill');
-const executeSkillStepButton = $('#execute-skill-step');
-const cancelSkillRunButton = $('#cancel-skill-run');
-const skillStatus = $('#skill-status');
-const pauseAiButton = $('#pause-ai');
-const resumeAiButton = $('#resume-ai');
-const showAuditButton = $('#show-audit');
-const safetyTitle = $('#safety-title');
-const safetyDetail = $('#safety-detail');
+const taskInput = $('#task-input');
+const taskButton = $('#task-button');
+const taskStatus = $('#task-status');
+const stepCard = $('#step-card');
+const stepNumber = $('#step-number');
+const stepReason = $('#step-reason');
+const stepAction = $('#step-action');
+const stepResult = $('#step-result');
+const executeButton = $('#execute-button');
+const feedbackCard = $('#feedback-card');
+const feedbackTitle = $('#feedback-title');
+const feedbackDetail = $('#feedback-detail');
+const positiveButton = $('#positive-button');
+const negativeButton = $('#negative-button');
+const demoButton = $('#demo-button');
+const demoRunButton = $('#demo-run-button');
+const demoTitle = $('#demo-title');
+const demoStatus = $('#demo-status');
+const demoLive = $('#demo-live');
+const traceCanvas = $('#trace-canvas');
+const eventCount = $('#event-count');
+const keys = $('#keys');
 
-let currentWindowHandle = null;
-let currentAgentPlan = null;
+let selectedWindowHandle = null;
 let currentMission = null;
-let currentTeachingSession = null;
+let currentPlan = null;
+let completedStep = null;
 let currentSkillRun = null;
-let executionPaused = false;
-
-function showJson(value) {
-  result.textContent = JSON.stringify(value, null, 2);
-}
-
-function renderSafetyState(state) {
-  executionPaused = state?.paused === true;
-  safetyTitle.textContent = executionPaused ? 'ИИ ОСТАНОВЛЕН' : 'Действия ИИ разрешены';
-  safetyDetail.textContent = executionPaused
-    ? `Новые действия заблокированы${state?.reason ? `: ${state.reason}` : '.'}`
-    : 'Кнопка или Ctrl+Shift+F12 блокирует любые новые клики, ввод и шаги навыков.';
-  pauseAiButton.disabled = executionPaused;
-  resumeAiButton.disabled = !executionPaused;
-  executePlanButton.disabled = executionPaused || !currentAgentPlan ||
-    currentAgentPlan.proposal?.action?.type === 'done' || currentAgentPlan.policy?.allowExecution === false;
-  executeSkillStepButton.disabled = executionPaused || !currentSkillRun;
-}
+let latestDemonstratedSkillId = localStorage.getItem('ai-latest-skill-id') || null;
+let windowCatalog = [];
+let teachingSession = null;
+let teachingTimer = null;
+let paused = false;
+let busy = false;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -80,737 +57,576 @@ async function api(path, options = {}) {
   return body;
 }
 
-function renderTeachingState(body) {
-  const active = body?.active === true;
-  currentTeachingSession = active ? body.session : null;
-  startTeachingButton.disabled = active || !currentWindowHandle;
-  stopTeachingButton.disabled = !active;
-  cancelTeachingButton.disabled = !active;
-  windowSelect.disabled = active;
-  planNextButton.disabled = active || !currentWindowHandle;
-  if (active) {
-    teachingStatus.textContent = `Запись активна: ${body.session?.name || 'новый навык'}. Покажите действия в выбранной программе, затем вернитесь и сохраните.`;
-  } else if (!currentWindowHandle) {
-    teachingStatus.textContent = 'Выберите окно второго монитора, введите задачу и нажмите «Начать показ».';
-  } else {
-    teachingStatus.textContent = 'Готово к записи. Основной экран и парольные поля не записываются.';
-  }
+function setStatus(message, { error = false } = {}) {
+  taskStatus.textContent = message;
+  taskStatus.classList.toggle('error', error);
 }
 
-async function loadSkills() {
-  try {
-    const body = await api('/api/skills');
-    const selected = skillSelect.value;
-    skillSelect.replaceChildren();
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = body.count ? 'Выберите выученный навык' : 'Сохранённых навыков пока нет';
-    skillSelect.append(placeholder);
-    for (const skill of body.skills) {
-      const option = document.createElement('option');
-      option.value = skill.skillId;
-      option.textContent = `${skill.name} · ${skill.application?.processName || 'приложение'} · ${skill.steps?.length || 0} шагов`;
-      skillSelect.append(option);
-    }
-    if ([...skillSelect.options].some((option) => option.value === selected)) skillSelect.value = selected;
-    prepareSkillButton.disabled = !currentWindowHandle || !skillSelect.value || Boolean(currentSkillRun);
-    return body;
-  } catch (error) {
-    skillStatus.textContent = `Не удалось загрузить навыки: ${error.message}`;
-    return null;
-  }
-}
-
-function renderBoundaries(body, visionStatus) {
-  const independence = body.independentControl;
-  ownerSession.textContent = independence?.windowsSessionId ?? body.worker?.diagnostics?.session?.sessionId ?? '—';
-  workerSession.textContent = independence?.assignedDisplay ?? body.worker?.uiAutomation?.assignedDisplay ?? '—';
-  controlMethod.textContent = independence?.controlMethod ?? 'недоступен';
-  isolationChecks.replaceChildren();
-
+function actionLabel(action = {}) {
   const labels = {
-    display_boundary: `Зрение и управление ограничены монитором ${independence?.assignedDisplay || '—'}`,
-    window_local_control: 'Собственное управление отправляет действия прямо выбранному окну',
-    physical_pointer_unused: 'Физическая мышь пользователя не используется',
-    virtual_pointer: 'Синий AI-курсор запущен',
-    confirmation_policy: 'Каждое изменение требует подтверждения',
-    emergency_stop: `Аварийная клавиша ${body.worker?.emergencyHotkey?.shortcut || 'Ctrl+Shift+F12'} зарегистрирована`,
-    not_paused: 'AI-управление не остановлено'
+    click: 'Нажать', doubleClick: 'Двойное нажатие', drag: 'Перетащить',
+    scroll: 'Прокрутить', typeText: 'Ввести текст', pressKey: 'Нажать клавишу',
+    wait: 'Подождать', done: 'Завершить'
   };
-  const checks = [
-    ...(independence?.checks || []).map((check) => ({ passed: check.passed, label: labels[check.id] || check.id })),
-    {
-      passed: visionStatus?.local?.reachable === true,
-      label: visionStatus?.local?.reachable
-        ? `Локальный LM Studio доступен; моделей: ${visionStatus.local.models?.length || 0}`
-        : 'Локальный LM Studio пока недоступен'
-    }
-  ];
-
-  for (const check of checks) {
-    const item = document.createElement('li');
-    item.className = check.passed ? 'check-pass' : 'check-fail';
-    item.textContent = `${check.passed ? '✓' : '○'} ${check.label}`;
-    isolationChecks.append(item);
-  }
+  const target = action.targetHint?.visibleText || action.targetHint?.name || action.targetHint?.automationId ||
+    action.target?.name || action.target?.automationId;
+  const detail = action.type === 'typeText' ? `: «${String(action.text || '').slice(0, 80)}»`
+    : action.type === 'pressKey' ? `: ${action.key}`
+    : target ? `: ${target}` : '';
+  return `${labels[action.type] || action.type || 'Действие'}${detail}`;
 }
 
-async function refreshStatus() {
-  statusDot.className = 'status-dot pending';
-  statusTitle.textContent = 'Проверяем Worker…';
-  statusDetail.textContent = 'Подключение к локальному исполнителю.';
+function resetStepView() {
+  currentPlan = null;
+  stepCard.hidden = true;
+  executeButton.disabled = false;
+}
 
+function resetFeedbackView() {
+  completedStep = null;
+  feedbackCard.hidden = true;
+  positiveButton.disabled = false;
+  negativeButton.disabled = false;
+  positiveButton.textContent = '👍';
+  negativeButton.textContent = '👎';
+}
+
+function updateControls() {
+  const hasInput = Boolean(selectedWindowHandle && taskInput.value.trim());
+  taskButton.disabled = busy || paused || Boolean(teachingSession) || Boolean(currentSkillRun) || !hasInput || Boolean(currentPlan) || Boolean(completedStep);
+  demoButton.disabled = busy || !hasInput;
+  demoRunButton.disabled = busy || paused || !selectedWindowHandle || !latestDemonstratedSkillId || Boolean(teachingSession) || Boolean(currentPlan) || Boolean(completedStep) || Boolean(currentSkillRun);
+  windowSelect.disabled = busy || Boolean(teachingSession) || Boolean(currentSkillRun);
+  taskInput.disabled = busy || Boolean(teachingSession) || Boolean(currentSkillRun);
+  executeButton.disabled = busy || paused || (!currentPlan && !currentSkillRun?.currentStep);
+}
+
+async function cancelMission() {
+  if (!currentMission?.missionId) return;
   try {
-    const body = await api('/api/status');
-    let visionStatus = null;
-    try { visionStatus = await api('/api/vision/status'); } catch {}
-    let teachingState = null;
-    try { teachingState = await api('/api/teach/status'); } catch {}
-    renderSafetyState(body.worker?.safety);
-    const uia = body.worker?.uiAutomation;
-    const independence = body.independentControl;
-    statusDot.className = `status-dot ${independence?.ready ? 'ready' : 'error'}`;
-    statusTitle.textContent = independence?.ready
-      ? 'AI готов работать на втором мониторе'
-      : 'Неинвазивное управление недоступно';
-    statusDetail.textContent = independence?.ready
-      ? `Закреплён ${independence.assignedDisplay}; физическая мышь свободна, изменения выполняются только после подтверждения.`
-      : uia?.error || body.worker?.diagnosticsError || 'Проверьте Worker.';
-    displayDetail.textContent = uia?.available
-      ? `${uia.assignedDisplay}: ${uia.bounds.width}×${uia.bounds.height}, координаты ${uia.bounds.x}:${uia.bounds.y}`
-      : 'Второй монитор пока не определён.';
-    renderBoundaries(body, visionStatus);
-    renderTeachingState(teachingState);
-    await loadSkills();
-    showJson({
-      ready: independence?.ready === true,
-      display: uia?.assignedDisplay,
-      mode: independence?.mode,
-      pointerOverlay: body.worker?.pointerOverlay,
-      safety: body.worker?.safety,
-      emergencyHotkey: body.worker?.emergencyHotkey,
-      vision: visionStatus,
-      message: 'Нажмите «Найти окна», чтобы проверить новый канал.'
-    });
-  } catch (error) {
-    statusDot.className = 'status-dot error';
-    statusTitle.textContent = 'Worker недоступен';
-    statusDetail.textContent = 'Запустите scripts/start-worker.ps1.';
-    showJson({ error: error.message });
-  }
-}
-
-function windowLabel(window) {
-  const title = window.name || '(окно без названия)';
-  return `${title} · ${window.processName || 'process'}`;
-}
-
-async function scanWindows() {
-  $('#scan-windows').disabled = true;
-  try {
-    const body = await api('/api/uia/windows');
-    const windows = body.windows
-      .filter((window) => window.name && !['ChatGPT', 'Codex'].includes(window.processName))
-      .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
-
-    windowSelect.replaceChildren();
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = windows.length ? 'Выберите программу' : 'Подходящих окон не найдено';
-    windowSelect.append(placeholder);
-
-    for (const window of windows) {
-      const option = document.createElement('option');
-      option.value = String(window.nativeWindowHandle);
-      option.textContent = windowLabel(window);
-      windowSelect.append(option);
-    }
-    inspectButton.disabled = true;
-    analyzeButton.disabled = true;
-    auditTelegramButton.disabled = true;
-    recommendSkillButton.disabled = true;
-    planNextButton.disabled = true;
-    executePlanButton.disabled = true;
-    cancelMissionButton.disabled = true;
-    currentAgentPlan = null;
-    currentMission = null;
-    planNextButton.textContent = 'Qwen: начать многошаговую задачу';
-    currentWindowHandle = null;
-    showJson({ found: windows.length, display: body.display?.assignedDisplay, windows });
-  } catch (error) {
-    showJson({ error: error.message });
-  } finally {
-    $('#scan-windows').disabled = false;
-  }
-}
-
-function actionLabel(action) {
-  return {
-    invoke: 'Нажать',
-    toggle: 'Переключить',
-    select: 'Выбрать',
-    expand: 'Раскрыть',
-    collapse: 'Свернуть'
-  }[action] || action;
-}
-
-function elementSelector(element) {
-  if (element.runtimeId) return { runtimeId: element.runtimeId };
-  if (element.automationId) return { automationId: element.automationId, controlType: element.controlType };
-  return { name: element.name, controlType: element.controlType };
-}
-
-async function runElementAction(element, action, value) {
-  const readableName = element.name || element.automationId || element.controlType;
-  if (!window.confirm(`Выполнить «${actionLabel(action)}» для элемента «${readableName}»?`)) return;
-
-  try {
-    const body = await api('/api/uia/actions', {
-      method: 'POST',
-      body: JSON.stringify({
-        windowHandle: currentWindowHandle,
-        selector: elementSelector(element),
-        action,
-        ...(action === 'setValue' ? { value } : {}),
-        confirmed: true
-      })
-    });
-    showJson(body);
-    await inspectWindow();
-  } catch (error) {
-    showJson({ error: error.message, element: readableName, action });
-  }
-}
-
-function renderElements(elements) {
-  const actionable = elements.filter((element) =>
-    element.enabled &&
-    !element.offscreen &&
-    element.bounds?.width > 0 &&
-    element.bounds?.height > 0 &&
-    element.capabilities?.length > 0 &&
-    (element.name || element.automationId)
-  );
-
-  elementList.replaceChildren();
-  if (!actionable.length) {
-    const empty = document.createElement('p');
-    empty.className = 'empty-state';
-    empty.textContent = 'У этого окна не найдено стандартных Accessibility-действий. Для него понадобится визуальный исполнитель второго этапа.';
-    elementList.append(empty);
-    return;
-  }
-
-  for (const element of actionable.slice(0, 100)) {
-    const card = document.createElement('article');
-    card.className = 'element-card';
-
-    const description = document.createElement('div');
-    description.className = 'element-description';
-    const title = document.createElement('strong');
-    title.textContent = element.name || element.automationId;
-    const meta = document.createElement('small');
-    meta.textContent = `${element.controlType} · ${element.automationId || 'без AutomationId'}`;
-    description.append(title, meta);
-
-    const actions = document.createElement('div');
-    actions.className = 'element-actions';
-
-    if (element.capabilities.includes('value')) {
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.value = element.value ?? '';
-      input.setAttribute('aria-label', `Новое значение: ${element.name || element.automationId}`);
-      const button = document.createElement('button');
-      button.className = 'secondary compact';
-      button.textContent = 'Записать';
-      button.addEventListener('click', () => runElementAction(element, 'setValue', input.value));
-      actions.append(input, button);
-    }
-
-    for (const action of ['invoke', 'toggle', 'select', 'expand', 'collapse']) {
-      if (!element.capabilities.includes(action) && !(action === 'expand' && element.capabilities.includes('expandCollapse'))) continue;
-      if (action === 'collapse' && !element.capabilities.includes('expandCollapse')) continue;
-      const button = document.createElement('button');
-      button.className = 'secondary compact';
-      button.textContent = actionLabel(action);
-      button.addEventListener('click', () => runElementAction(element, action));
-      actions.append(button);
-    }
-
-    card.append(description, actions);
-    elementList.append(card);
-  }
-}
-
-async function inspectWindow() {
-  if (!currentWindowHandle) return;
-  inspectButton.disabled = true;
-  try {
-    const body = await api('/api/uia/inspect', {
-      method: 'POST',
-      body: JSON.stringify({ windowHandle: currentWindowHandle, maxDepth: 7, maxElements: 800 })
-    });
-    renderElements(body.elements);
-    showJson({
-      window: body.window,
-      scannedElements: body.count,
-      truncated: body.truncated,
-      actionableElements: body.elements.filter((element) => element.capabilities?.length).length
-    });
-  } catch (error) {
-    elementList.innerHTML = `<p class="empty-state"></p>`;
-    elementList.firstElementChild.textContent = error.message;
-    showJson({ error: error.message });
-  } finally {
-    inspectButton.disabled = false;
-  }
-}
-
-windowSelect.addEventListener('change', async () => {
-  if (currentMission?.missionId) {
-    try {
-      await api('/api/missions/cancel', {
-        method: 'POST', body: JSON.stringify({ missionId: currentMission.missionId })
-      });
-    } catch {}
-  }
-  currentMission = null;
-  currentWindowHandle = Number.parseInt(windowSelect.value, 10) || null;
-  inspectButton.disabled = !currentWindowHandle;
-  analyzeButton.disabled = !currentWindowHandle;
-  auditTelegramButton.disabled = !currentWindowHandle;
-  recommendSkillButton.disabled = !currentWindowHandle;
-  planNextButton.disabled = !currentWindowHandle;
-  executePlanButton.disabled = true;
-  cancelMissionButton.disabled = true;
-  currentAgentPlan = null;
-  planNextButton.textContent = 'Qwen: начать многошаговую задачу';
-  startTeachingButton.disabled = Boolean(currentTeachingSession) || !currentWindowHandle;
-  prepareSkillButton.disabled = !currentWindowHandle || !skillSelect.value || Boolean(currentSkillRun);
-  agentPlanStatus.textContent = currentWindowHandle
-    ? 'Введите задачу. Qwen будет выполнять её по одному проверяемому шагу.'
-    : 'Выберите окно второго монитора.';
-  if (!currentTeachingSession) {
-    teachingStatus.textContent = currentWindowHandle
-      ? 'Готово к записи. Основной экран и парольные поля не записываются.'
-      : 'Выберите окно второго монитора, введите задачу и нажмите «Начать показ».';
-  }
-});
-
-planNextButton.addEventListener('click', async () => {
-  if (!currentWindowHandle) return;
-  const instruction = prompt.value.trim();
-  if (!instruction) return showJson({ error: 'Введите задачу для локальной модели.' });
-  planNextButton.disabled = true;
-  executePlanButton.disabled = true;
-  currentAgentPlan = null;
-  agentPlanStatus.textContent = 'Qwen изучает окно и готовит следующий шаг без выполнения…';
-  try {
-    if (!currentMission?.missionId) {
-      const started = await api('/api/missions', {
-        method: 'POST',
-        body: JSON.stringify({ windowHandle: currentWindowHandle, instruction, maxSteps: 20 })
-      });
-      currentMission = started.mission;
-      cancelMissionButton.disabled = false;
-      planNextButton.textContent = 'Qwen: следующий шаг';
-    }
-    const body = await api('/api/missions/plan-next', {
+    await api('/api/missions/cancel', {
       method: 'POST',
       body: JSON.stringify({ missionId: currentMission.missionId })
     });
-    currentMission = body.mission;
-    const done = body.proposal?.action?.type === 'done' || body.mission?.status === 'complete';
-    const blocked = body.policy?.allowExecution === false;
-    currentAgentPlan = done || blocked ? null : body;
-    executePlanButton.disabled = executionPaused || done || blocked;
-    if (done) {
-      currentMission = null;
-      cancelMissionButton.disabled = true;
-      planNextButton.textContent = 'Qwen: начать новую задачу';
-      agentPlanStatus.textContent = 'Qwen считает многошаговую задачу выполненной. Проверьте итог.';
-    } else if (blocked) {
-      agentPlanStatus.textContent = `Шаг заблокирован политикой: ${body.policy.reason}`;
-    } else {
-      const step = (body.mission?.stepCount || 0) + 1;
-      agentPlanStatus.textContent = `Шаг ${step} готов: ${body.proposal?.reason || body.proposal?.action?.type}. Требуется подтверждение.`;
-    }
-    showJson(body);
-  } catch (error) {
-    agentPlanStatus.textContent = `План безопасно остановлен: ${error.message}`;
-    showJson(error.body || { error: error.message });
-  } finally {
-    planNextButton.disabled = !currentWindowHandle || Boolean(currentAgentPlan);
-  }
-});
-
-executePlanButton.addEventListener('click', async () => {
-  if (!currentAgentPlan?.planId) return;
-  const proposal = currentAgentPlan.proposal;
-  const risk = currentAgentPlan.policy?.effectiveRisk || proposal?.risk?.level || 'dangerous';
-  const question = [
-    `Действие: ${proposal?.action?.type || 'неизвестно'}`,
-    `Причина: ${proposal?.reason || 'не указана'}`,
-    `Риск: ${risk} — ${currentAgentPlan.policy?.reason || proposal?.risk?.reason || 'не классифицирован'}`,
-    `Ожидаемый результат: ${proposal?.expectedResult || 'не указан'}`,
-    '',
-    'Выполнить этот единственный шаг?'
-  ].join('\n');
-  if (!window.confirm(question)) return;
-
-  executePlanButton.disabled = true;
-  planNextButton.disabled = true;
-  agentPlanStatus.textContent = 'Выполняется один подтверждённый шаг и проверяется результат…';
-  try {
-    const body = await api('/api/agent/execute-plan', {
-      method: 'POST',
-      body: JSON.stringify({ planId: currentAgentPlan.planId, confirmed: true })
-    });
-    currentMission = body.mission || currentMission;
-    showJson(body);
-    const missionFinished = ['complete', 'limit_reached', 'cancelled'].includes(currentMission?.status);
-    agentPlanStatus.textContent = body.validation?.success
-      ? `Шаг выполнен и проверен. Выполнено шагов: ${currentMission?.stepCount || 1}.`
-      : 'Шаг выполнен, но результат не подтверждён. Qwen учтёт это при следующем плане.';
-    currentAgentPlan = null;
-    if (missionFinished) {
-      currentMission = null;
-      cancelMissionButton.disabled = true;
-      planNextButton.textContent = 'Qwen: начать новую задачу';
-    } else {
-      planNextButton.textContent = 'Qwen: следующий шаг';
-    }
-  } catch (error) {
-    agentPlanStatus.textContent = 'Шаг не выполнен.';
-    showJson({ error: error.message });
-    currentAgentPlan = null;
-  } finally {
-    planNextButton.disabled = !currentWindowHandle;
-  }
-});
-
-cancelMissionButton.addEventListener('click', async () => {
-  if (!currentMission?.missionId) return;
-  if (!window.confirm('Остановить текущую многошаговую задачу?')) return;
-  try {
-    await api('/api/missions/cancel', {
-      method: 'POST', body: JSON.stringify({ missionId: currentMission.missionId })
-    });
-  } catch {}
+  } catch { }
   currentMission = null;
-  currentAgentPlan = null;
-  executePlanButton.disabled = true;
-  cancelMissionButton.disabled = true;
-  planNextButton.disabled = !currentWindowHandle;
-  planNextButton.textContent = 'Qwen: начать новую задачу';
-  agentPlanStatus.textContent = 'Задача остановлена.';
-});
+  resetStepView();
+}
 
-pauseAiButton.addEventListener('click', async () => {
-  pauseAiButton.disabled = true;
-  try {
-    const body = await api('/api/safety/pause', {
-      method: 'POST',
-      body: JSON.stringify({ reason: 'Аварийная пауза из панели' })
-    });
-    renderSafetyState(body);
-    showJson({ safety: body, message: 'Все новые действия ИИ заблокированы.' });
-  } catch (error) {
-    pauseAiButton.disabled = false;
-    showJson({ error: error.message });
-  }
-});
-
-resumeAiButton.addEventListener('click', async () => {
-  if (!window.confirm('Снова разрешить ИИ выполнять только подтверждённые действия?')) return;
-  resumeAiButton.disabled = true;
-  try {
-    const body = await api('/api/safety/resume', {
-      method: 'POST',
-      body: JSON.stringify({ confirmed: true })
-    });
-    renderSafetyState(body);
-    showJson({ safety: body, message: 'Выполнение подтверждённых действий снова разрешено.' });
-  } catch (error) {
-    resumeAiButton.disabled = false;
-    showJson({ error: error.message });
-  }
-});
-
-showAuditButton.addEventListener('click', async () => {
-  try {
-    showJson(await api('/api/audit?limit=100'));
-  } catch (error) {
-    showJson({ error: error.message });
-  }
-});
-
-startTeachingButton.addEventListener('click', async () => {
-  if (!currentWindowHandle) return;
-  const instruction = prompt.value.trim();
-  if (!instruction) return showJson({ error: 'Опишите задачу, которую вы собираетесь показать.' });
-  const name = skillName.value.trim() || instruction.slice(0, 96);
-  if (!window.confirm('Начать запись демонстрации только внутри выбранного окна?\n\nПарольные поля и действия на основном мониторе не записываются.')) return;
-  startTeachingButton.disabled = true;
-  planNextButton.disabled = true;
-  teachingStatus.textContent = 'Запускается безопасная запись показа…';
-  try {
-    const body = await api('/api/teach/start', {
-      method: 'POST',
-      body: JSON.stringify({ windowHandle: currentWindowHandle, name, instruction, maxDurationSeconds: 120 })
-    });
-    currentTeachingSession = body;
-    stopTeachingButton.disabled = false;
-    cancelTeachingButton.disabled = false;
-    windowSelect.disabled = true;
-    teachingStatus.textContent = 'Запись идёт. Покажите действия в выбранной программе, затем нажмите «Завершить и сохранить».';
-    showJson(body);
-  } catch (error) {
-    currentTeachingSession = null;
-    startTeachingButton.disabled = !currentWindowHandle;
-    planNextButton.disabled = !currentWindowHandle;
-    teachingStatus.textContent = 'Запись не запущена.';
-    showJson({ error: error.message });
-  }
-});
-
-stopTeachingButton.addEventListener('click', async () => {
-  if (!currentTeachingSession?.sessionId) return;
-  stopTeachingButton.disabled = true;
-  cancelTeachingButton.disabled = true;
-  teachingStatus.textContent = 'Останавливаю запись и собираю воспроизводимый навык…';
-  try {
-    const body = await api('/api/teach/stop', {
-      method: 'POST',
-      body: JSON.stringify({ sessionId: currentTeachingSession.sessionId })
-    });
-    currentTeachingSession = null;
-    windowSelect.disabled = false;
-    startTeachingButton.disabled = !currentWindowHandle;
-    planNextButton.disabled = !currentWindowHandle;
-    teachingStatus.textContent = `Навык сохранён: ${body.skill?.name || body.skill?.skillId}. Шагов: ${body.skill?.steps?.length || 0}.`;
-    showJson(body);
-    await loadSkills();
-  } catch (error) {
-    teachingStatus.textContent = 'Не удалось сохранить показ. Проверьте журнал.';
-    showJson({ error: error.message });
-  }
-});
-
-cancelTeachingButton.addEventListener('click', async () => {
-  if (!currentTeachingSession?.sessionId) return;
-  if (!window.confirm('Отменить текущую запись без сохранения навыка?')) return;
-  try {
-    await api('/api/teach/cancel', {
-      method: 'POST',
-      body: JSON.stringify({ sessionId: currentTeachingSession.sessionId })
-    });
-  } catch {}
-  currentTeachingSession = null;
-  windowSelect.disabled = false;
-  stopTeachingButton.disabled = true;
-  cancelTeachingButton.disabled = true;
-  startTeachingButton.disabled = !currentWindowHandle;
-  planNextButton.disabled = !currentWindowHandle;
-  teachingStatus.textContent = 'Запись отменена.';
-});
-
-skillSelect.addEventListener('change', () => {
-  prepareSkillButton.disabled = !currentWindowHandle || !skillSelect.value || Boolean(currentSkillRun);
-  if (!currentSkillRun) {
-    skillStatus.textContent = skillSelect.value
-      ? 'Навык выбран. Подготовьте его для текущего окна.'
-      : 'Каждый выученный шаг отдельно показывается и требует подтверждения.';
-  }
-});
-
-refreshSkillsButton.addEventListener('click', loadSkills);
-
-recommendSkillButton.addEventListener('click', async () => {
-  if (!currentWindowHandle) return;
-  const instruction = prompt.value.trim();
-  if (!instruction) return showJson({ error: 'Сначала опишите задачу для подбора навыка.' });
-  recommendSkillButton.disabled = true;
-  skillStatus.textContent = 'Локальная Qwen сравнивает задачу только с навыками выбранной программы…';
-  try {
-    const body = await api('/api/skills/recommend', {
-      method: 'POST',
-      body: JSON.stringify({ windowHandle: currentWindowHandle, instruction })
-    });
-    if (body.skill?.skillId) {
-      await loadSkills();
-      skillSelect.value = body.skill.skillId;
-      const prepared = await api('/api/skills/prepare', {
-        method: 'POST',
-        body: JSON.stringify({ skillId: body.skill.skillId, windowHandle: currentWindowHandle })
-      });
-      currentSkillRun = prepared;
-      windowSelect.disabled = true;
-      skillSelect.disabled = true;
-      executeSkillStepButton.disabled = false;
-      cancelSkillRunButton.disabled = false;
-      prepareSkillButton.disabled = true;
-      skillStatus.textContent = `Навык «${body.skill.name}» подобран и подготовлен. Следующий шаг ${prepared.currentStep?.type} выполнится только после подтверждения.`;
-      showJson({ recommendation: body, prepared });
-    } else {
-      skillStatus.textContent = body.recommendation?.reason || 'Подходящий навык не найден.';
-      showJson(body);
-    }
-  } catch (error) {
-    skillStatus.textContent = 'Не удалось подобрать навык.';
-    showJson({ error: error.message });
-  } finally {
-    recommendSkillButton.disabled = !currentWindowHandle;
-  }
-});
-
-prepareSkillButton.addEventListener('click', async () => {
-  if (!currentWindowHandle || !skillSelect.value) return;
-  prepareSkillButton.disabled = true;
-  skillStatus.textContent = 'Проверяю совместимость навыка с выбранной программой…';
-  try {
-    const body = await api('/api/skills/prepare', {
-      method: 'POST',
-      body: JSON.stringify({ skillId: skillSelect.value, windowHandle: currentWindowHandle })
-    });
-    currentSkillRun = body;
-    windowSelect.disabled = true;
-    skillSelect.disabled = true;
-    executeSkillStepButton.disabled = false;
-    cancelSkillRunButton.disabled = false;
-    skillStatus.textContent = `Навык готов. Следующий шаг: ${body.currentStep?.type}.`;
-    showJson(body);
-  } catch (error) {
-    prepareSkillButton.disabled = !currentWindowHandle || !skillSelect.value;
-    skillStatus.textContent = 'Навык не подготовлен.';
-    showJson({ error: error.message });
-  }
-});
-
-executeSkillStepButton.addEventListener('click', async () => {
-  if (!currentSkillRun?.runId) return;
-  const step = currentSkillRun.currentStep || currentSkillRun.nextStep;
-  const details = step?.type === 'typeText'
-    ? `\nТекст: ${step.text}`
-    : step?.type === 'pressKey' ? `\nКлавиша: ${step.key}` : '';
-  const risk = step?.policy?.effectiveRisk || 'dangerous';
-  const external = step?.policy?.externalEnvironment ? '\nВНИМАНИЕ: это внешняя программа.' : '';
-  const question = `Выполнить выученный шаг ${step?.index + 1}: ${step?.type}?${details}\nРиск: ${risk}\n${step?.policy?.reason || ''}${external}`;
-  if (!window.confirm(question)) return;
-  executeSkillStepButton.disabled = true;
-  skillStatus.textContent = 'Выполняю один подтверждённый шаг и проверяю результат…';
-  try {
-    const body = await api('/api/skills/execute-step', {
-      method: 'POST',
-      body: JSON.stringify({ runId: currentSkillRun.runId, confirmed: true })
-    });
-    showJson(body);
-    if (body.status === 'complete') {
-      currentSkillRun = null;
-      windowSelect.disabled = false;
-      skillSelect.disabled = false;
-      cancelSkillRunButton.disabled = true;
-      prepareSkillButton.disabled = !currentWindowHandle || !skillSelect.value;
-      skillStatus.textContent = 'Все шаги навыка выполнены.';
-    } else {
-      currentSkillRun = { ...currentSkillRun, ...body, currentStep: body.nextStep };
-      executeSkillStepButton.disabled = false;
-      skillStatus.textContent = `Шаг выполнен. Следующий: ${body.nextStep?.type}.`;
-    }
-  } catch (error) {
-    executeSkillStepButton.disabled = false;
-    skillStatus.textContent = 'Шаг не выполнен.';
-    showJson({ error: error.message });
-  }
-});
-
-cancelSkillRunButton.addEventListener('click', async () => {
+async function cancelSkillRun() {
   if (!currentSkillRun?.runId) return;
   try {
     await api('/api/skills/cancel-run', {
       method: 'POST',
       body: JSON.stringify({ runId: currentSkillRun.runId })
     });
-  } catch {}
+  } catch { }
   currentSkillRun = null;
-  windowSelect.disabled = false;
-  skillSelect.disabled = false;
-  executeSkillStepButton.disabled = true;
-  cancelSkillRunButton.disabled = true;
-  prepareSkillButton.disabled = !currentWindowHandle || !skillSelect.value;
-  skillStatus.textContent = 'Выполнение навыка остановлено.';
-});
+  resetStepView();
+}
 
-auditTelegramButton.addEventListener('click', async () => {
-  if (!currentWindowHandle) return;
-  auditTelegramButton.disabled = true;
-  showJson({ state: 'telegram_preview_started', mode: 'read-only', message: 'Ищем badge без открытия чатов…' });
+async function refreshLatestDemonstration() {
+  const selected = windowCatalog.find((item) => Number(item.nativeWindowHandle) === selectedWindowHandle);
+  if (!selected) {
+    latestDemonstratedSkillId = null;
+    demoRunButton.hidden = true;
+    return;
+  }
   try {
-    const body = await api('/api/telegram/audit-preview', {
-      method: 'POST',
-      body: JSON.stringify({ windowHandle: currentWindowHandle })
-    });
-    showJson({
-      mode: body.mode,
-      actionsPerformed: body.actionsPerformed,
-      readReceiptsSent: body.readReceiptsSent,
-      candidateCount: body.candidateCount,
-      candidates: body.candidates,
-      warning: body.warning,
-      screenshot: body.observation?.outputPath
-    });
+    const body = await api('/api/skills');
+    const skill = (body.skills || []).find((item) => item.application?.processName === selected.processName);
+    latestDemonstratedSkillId = skill?.skillId || null;
+    if (latestDemonstratedSkillId) {
+      localStorage.setItem('ai-latest-skill-id', latestDemonstratedSkillId);
+      demoRunButton.hidden = false;
+      if (demoTitle.textContent === 'Модель не поняла?') {
+        demoStatus.textContent = `Есть сохранённый показ «${skill.instruction}». Его можно выполнить кнопкой ниже.`;
+      }
+    } else {
+      demoRunButton.hidden = true;
+    }
+  } catch { }
+}
+
+async function scanWindows() {
+  const previous = String(selectedWindowHandle || localStorage.getItem('ai-window-handle') || '');
+  try {
+    const body = await api('/api/uia/windows');
+    const windows = (body.windows || [])
+      .filter((item) => item.name && !['ChatGPT', 'Codex'].includes(item.processName))
+      .sort((left, right) => left.name.localeCompare(right.name, 'ru'));
+    windowCatalog = windows;
+    windowSelect.replaceChildren();
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = windows.length ? 'Выберите открытую программу' : 'Открытые программы не найдены';
+    windowSelect.append(empty);
+    for (const item of windows) {
+      const option = document.createElement('option');
+      option.value = String(item.nativeWindowHandle);
+      option.textContent = `${item.name} · ${item.processName}`;
+      windowSelect.append(option);
+    }
+    if ([...windowSelect.options].some((option) => option.value === previous)) {
+      windowSelect.value = previous;
+    } else if (windows.length === 1) {
+      windowSelect.value = String(windows[0].nativeWindowHandle);
+    }
+    selectedWindowHandle = Number(windowSelect.value) || null;
+    await refreshLatestDemonstration();
   } catch (error) {
-    showJson({ error: error.message });
+    windowSelect.replaceChildren(new Option('Не удалось получить список программ', ''));
+    setStatus(error.message, { error: true });
+  }
+  updateControls();
+}
+
+async function refreshSystemStatus() {
+  try {
+    const body = await api('/api/status');
+    paused = body.worker?.safety?.paused === true;
+    const ready = body.independentControl?.ready === true;
+    statusDot.className = `status-dot ${ready ? 'ready' : 'error'}`;
+    statusText.textContent = paused ? 'Действия приостановлены' : ready ? 'Локальная модель готова' : 'Управление пока не готово';
+    safetyToggle.textContent = paused ? 'Продолжить' : 'Стоп';
+    safetyToggle.classList.toggle('resume', paused);
+  } catch (error) {
+    statusDot.className = 'status-dot error';
+    statusText.textContent = 'Локальный исполнитель недоступен';
+    setStatus(error.message, { error: true });
+  }
+  updateControls();
+}
+
+function showPlan(body) {
+  currentPlan = body;
+  stepNumber.textContent = `Шаг ${(body.mission?.stepCount || 0) + 1}`;
+  stepReason.textContent = body.proposal?.reason || 'Следующее действие';
+  stepAction.textContent = actionLabel(body.proposal?.action);
+  stepResult.textContent = body.proposal?.expectedResult ? `Ожидаемый результат: ${body.proposal.expectedResult}` : '';
+  stepCard.hidden = false;
+  setStatus('Модель предложила один шаг. Нажатие кнопки ниже — его подтверждение.');
+  updateControls();
+}
+
+function showLearnedStep(step) {
+  if (!currentSkillRun || !step) return;
+  currentPlan = null;
+  currentSkillRun.currentStep = step;
+  stepNumber.textContent = `Шаг ${Number(step.index ?? currentSkillRun.stepIndex ?? 0) + 1} из ${currentSkillRun.skill?.stepCount || '?'}`;
+  stepReason.textContent = 'Шаг по вашей демонстрации';
+  stepAction.textContent = actionLabel(step);
+  stepResult.textContent = 'После выполнения оцените только результат: 👍 или 👎.';
+  stepCard.hidden = false;
+  setStatus('Навык подготовил следующий шаг по сохранённому показу. Подтвердите его выполнение.');
+  updateControls();
+}
+
+async function planNextStep(retriedAfterRestart = false) {
+  const instruction = taskInput.value.trim();
+  if (!selectedWindowHandle || !instruction || busy) return;
+  busy = true;
+  resetStepView();
+  setStatus('Модель изучает свежий интерфейс и готовит один шаг…');
+  updateControls();
+  try {
+    if (!currentMission?.missionId || currentMission.instruction !== instruction) {
+      await cancelMission();
+      const started = await api('/api/missions', {
+        method: 'POST',
+        body: JSON.stringify({ windowHandle: selectedWindowHandle, instruction, maxSteps: 30 })
+      });
+      currentMission = started.mission;
+    }
+    const body = await api('/api/missions/plan-next', {
+      method: 'POST',
+      body: JSON.stringify({ missionId: currentMission.missionId })
+    });
+    currentMission = body.mission;
+    if (body.proposal?.action?.type === 'done' || body.mission?.status === 'complete') {
+      currentMission = null;
+      taskButton.textContent = 'Начать новую задачу';
+      setStatus('Задача завершена. Проверьте итог в программе.');
+    } else if (body.policy?.allowExecution === false) {
+      setStatus(`Шаг остановлен безопасностью: ${body.policy.reason}`, { error: true });
+    } else {
+      showPlan(body);
+    }
+  } catch (error) {
+    if (error.body?.error === 'mission_not_found' && !retriedAfterRestart) {
+      currentMission = null;
+      busy = false;
+      updateControls();
+      return await planNextStep(true);
+    }
+    const suggestion = error.body?.abortReason === 'visual_target_not_verified'
+      ? ' Модель не уверена — нажмите «Демонстрация» и покажите правильный способ.'
+      : '';
+    setStatus(`${error.message}${suggestion}`, { error: true });
   } finally {
-    auditTelegramButton.disabled = !currentWindowHandle;
+    busy = false;
+    updateControls();
   }
-});
+}
 
-analyzeButton.addEventListener('click', async () => {
-  if (!currentWindowHandle) return;
-  analyzeButton.disabled = true;
-  const requestedPrompt = prompt.value.trim() || 'Опиши видимое окно, важный текст и элементы управления. Ничего не выполняй.';
-  showJson({ state: 'analysis_started', mode: 'read-only', message: 'Локальная модель анализирует снимок окна…' });
+async function executeStep() {
+  if (currentSkillRun?.currentStep) return executeLearnedStep();
+  if (!currentPlan?.planId || busy) return;
+  busy = true;
+  executeButton.disabled = true;
+  setStatus('Выполняю один шаг и проверяю результат…');
+  updateControls();
   try {
-    const body = await api('/api/vision/analyze-window', {
+    const body = await api('/api/agent/execute-plan', {
       method: 'POST',
-      body: JSON.stringify({ windowHandle: currentWindowHandle, prompt: requestedPrompt })
+      body: JSON.stringify({ planId: currentPlan.planId, confirmed: true })
     });
-    showJson({
-      mode: body.mode,
-      actionsPerformed: body.actionsPerformed,
-      window: body.window,
-      analysis: body.vision?.analysis,
-      stats: body.vision?.stats,
-      screenshot: body.observation?.outputPath
-    });
+    currentMission = body.mission || currentMission;
+    resetFeedbackView();
+    completedStep = body;
+    resetStepView();
+    feedbackCard.hidden = false;
+    feedbackTitle.textContent = body.validation?.success ? 'Шаг выполнен и проверен' : 'Шаг выполнен — проверьте глазами';
+    feedbackDetail.textContent = body.validation?.evidence || 'Отметьте только итог: правильно или неправильно.';
+    taskButton.textContent = 'Следующий шаг';
+    setStatus('Оцените результат шага: 👍 правильно, 👎 неправильно. После оценки модель сама подготовит следующий шаг.');
   } catch (error) {
-    showJson({ error: error.message, hint: 'Проверьте, что LM Studio Server запущен и модель загружена.' });
+    resetStepView();
+    setStatus(`Шаг не выполнен: ${error.message}`, { error: true });
   } finally {
-    analyzeButton.disabled = !currentWindowHandle;
+    busy = false;
+    updateControls();
   }
-});
+}
 
-$('#refresh').addEventListener('click', async () => {
-  try { await api('/api/refresh', { method: 'POST' }); } catch {}
-  await refreshStatus();
-});
-
-$('#scan-windows').addEventListener('click', scanWindows);
-inspectButton.addEventListener('click', inspectWindow);
-
-$('#submit').addEventListener('click', async () => {
-  const value = prompt.value.trim();
-  if (!value) return showJson({ error: 'Введите задачу.' });
+async function executeLearnedStep() {
+  if (!currentSkillRun?.runId || !currentSkillRun.currentStep || busy) return;
+  busy = true;
+  executeButton.disabled = true;
+  setStatus('Выполняю один шаг из вашей демонстрации и проверяю результат…');
+  updateControls();
   try {
-    showJson(await api('/api/tasks', {
+    const body = await api('/api/skills/execute-step', {
       method: 'POST',
-      body: JSON.stringify({ prompt: value, mode: mode.value })
-    }));
+      body: JSON.stringify({ runId: currentSkillRun.runId, confirmed: true })
+    });
+    currentSkillRun.status = body.status;
+    currentSkillRun.stepIndex = body.executedStepIndex + 1;
+    currentSkillRun.currentStep = null;
+    resetFeedbackView();
+    completedStep = { ...body, source: 'skill' };
+    resetStepView();
+    feedbackCard.hidden = false;
+    feedbackTitle.textContent = body.validation?.success ? 'Шаг по показу выполнен' : 'Проверьте шаг по показу';
+    feedbackDetail.textContent = body.validation?.evidence || 'Отметьте только итог: правильно или неправильно.';
+    setStatus('Оцените этот шаг: 👍 или 👎. Затем появится следующий шаг демонстрации.');
   } catch (error) {
-    showJson({ error: error.message });
+    setStatus(`Шаг демонстрации не выполнен: ${error.message}`, { error: true });
+  } finally {
+    busy = false;
+    updateControls();
+  }
+}
+
+async function rateStep(rating) {
+  if (!completedStep || busy) return;
+  const ratedStep = completedStep;
+  const payload = ratedStep.source === 'skill'
+    ? { runId: ratedStep.runId, executedStepIndex: ratedStep.executedStepIndex, rating }
+    : { planId: ratedStep.planId, rating };
+  if ((!payload.planId && !payload.runId) || !['positive', 'negative'].includes(rating)) return;
+  busy = true;
+  positiveButton.disabled = true;
+  negativeButton.disabled = true;
+  if (rating === 'positive') positiveButton.textContent = '⏳';
+  else negativeButton.textContent = '⏳';
+  updateControls();
+  let continueMission = false;
+  try {
+    const body = await api('/api/feedback/rate', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    completedStep = null;
+    feedbackCard.hidden = true;
+    if (ratedStep.source === 'skill') {
+      if (ratedStep.nextStep && ratedStep.status === 'ready') {
+        showLearnedStep(ratedStep.nextStep);
+      } else {
+        currentSkillRun = null;
+        demoRunButton.hidden = false;
+        setStatus('Выполнение по демонстрации завершено. Последняя оценка сохранена.');
+      }
+    } else {
+      currentMission = body.mission || currentMission;
+      continueMission = Boolean(currentMission && currentMission.status !== 'limit_reached');
+      setStatus(rating === 'positive'
+        ? 'Правильный результат сохранён. Готовлю следующий шаг…'
+        : 'Ошибка сохранена. Готовлю другой или исправляющий следующий шаг…');
+    }
+  } catch (error) {
+    setStatus(`Не удалось сохранить оценку: ${error.message}`, { error: true });
+    positiveButton.disabled = false;
+    negativeButton.disabled = false;
+    positiveButton.textContent = '👍';
+    negativeButton.textContent = '👎';
+  } finally {
+    busy = false;
+    updateControls();
+  }
+  if (continueMission) await planNextStep();
+}
+
+function drawTrace(events = []) {
+  const rect = traceCanvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * scale));
+  const height = Math.max(1, Math.round(rect.height * scale));
+  if (traceCanvas.width !== width || traceCanvas.height !== height) {
+    traceCanvas.width = width;
+    traceCanvas.height = height;
+  }
+  const context = traceCanvas.getContext('2d');
+  context.clearRect(0, 0, width, height);
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.lineWidth = 2.5 * scale;
+  context.strokeStyle = '#7379ff';
+  context.shadowColor = 'rgba(115,121,255,.6)';
+  context.shadowBlur = 8 * scale;
+  let previous = null;
+  for (const event of events) {
+    if (!event.point) continue;
+    const point = { x: event.point.x * width, y: event.point.y * height };
+    if (previous && event.type === 'pointerMove') {
+      context.beginPath();
+      context.moveTo(previous.x, previous.y);
+      context.lineTo(point.x, point.y);
+      context.stroke();
+    }
+    if (event.type === 'drag' && event.to) {
+      context.beginPath();
+      context.moveTo(point.x, point.y);
+      context.lineTo(event.to.x * width, event.to.y * height);
+      context.stroke();
+      previous = { x: event.to.x * width, y: event.to.y * height };
+    } else {
+      previous = point;
+    }
+    if (['click', 'doubleClick', 'drag'].includes(event.type)) {
+      context.save();
+      context.shadowBlur = 0;
+      context.fillStyle = event.button === 'right' ? '#ff8d9c' : '#72e6ad';
+      context.beginPath();
+      context.arc(point.x, point.y, 5 * scale, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+    }
+  }
+}
+
+function renderTeachingPreview(preview = { events: [], eventCount: 0 }) {
+  const events = preview.events || [];
+  drawTrace(events);
+  eventCount.textContent = `${preview.eventCount || 0} событий`;
+  const keyEvents = events.filter((event) => event.key || event.textChanged).slice(-18);
+  keys.replaceChildren();
+  if (!keyEvents.length) {
+    const placeholder = document.createElement('span');
+    placeholder.className = 'key-placeholder';
+    placeholder.textContent = 'Нажатые клавиши появятся здесь';
+    keys.append(placeholder);
+    return;
+  }
+  for (const event of keyEvents) {
+    const chip = document.createElement('span');
+    chip.className = 'key';
+    chip.textContent = event.key || 'Текст изменён';
+    keys.append(chip);
+  }
+}
+
+async function pollTeaching() {
+  try {
+    const body = await api('/api/teach/status');
+    if (!body.active) return;
+    teachingSession = body.session;
+    renderTeachingPreview(body.session?.preview);
+  } catch { }
+}
+
+function startTeachingPoll() {
+  clearInterval(teachingTimer);
+  teachingTimer = setInterval(pollTeaching, 300);
+}
+
+function stopTeachingPoll() {
+  clearInterval(teachingTimer);
+  teachingTimer = null;
+}
+
+async function toggleTeaching() {
+  if (busy) return;
+  busy = true;
+  updateControls();
+  try {
+    if (!teachingSession) {
+      await cancelMission();
+      await cancelSkillRun();
+      resetFeedbackView();
+      demoRunButton.hidden = true;
+      const instruction = taskInput.value.trim();
+      const body = await api('/api/teach/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          windowHandle: selectedWindowHandle,
+          instruction,
+          name: instruction.slice(0, 96),
+          maxDurationSeconds: 180
+        })
+      });
+      teachingSession = body;
+      demoButton.textContent = 'Завершить показ';
+      demoButton.classList.add('recording');
+      demoTitle.textContent = 'Демонстрация записывается';
+      demoStatus.textContent = 'Работайте в выбранной программе. Здесь видны траектория и клавиши.';
+      demoLive.hidden = false;
+      renderTeachingPreview();
+      startTeachingPoll();
+      setStatus('Покажите правильное выполнение в выбранной программе.');
+    } else {
+      stopTeachingPoll();
+      demoButton.disabled = true;
+      demoStatus.textContent = 'Собираю логический навык из траектории, элементов и клавиш…';
+      const body = await api('/api/teach/stop', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: teachingSession.sessionId })
+      });
+      teachingSession = null;
+      latestDemonstratedSkillId = body.skill?.skillId || null;
+      if (latestDemonstratedSkillId) localStorage.setItem('ai-latest-skill-id', latestDemonstratedSkillId);
+      demoButton.textContent = 'Демонстрация';
+      demoButton.classList.remove('recording');
+      demoTitle.textContent = 'Показ сохранён';
+      demoStatus.textContent = `Сохранено ${body.skill?.steps?.length || 0} действий. Верните программу к состоянию до показа и запустите выполнение ниже.`;
+      demoRunButton.hidden = !latestDemonstratedSkillId;
+      setStatus('Показ сохранён. Когда программа снова будет в исходном состоянии, нажмите «Выполнить с учётом показа».');
+    }
+  } catch (error) {
+    stopTeachingPoll();
+    if (teachingSession?.sessionId) {
+      try {
+        await api('/api/teach/cancel', {
+          method: 'POST',
+          body: JSON.stringify({ sessionId: teachingSession.sessionId })
+        });
+      } catch { }
+    }
+    teachingSession = null;
+    demoButton.textContent = 'Демонстрация';
+    demoButton.classList.remove('recording');
+    demoTitle.textContent = 'Показ не сохранён';
+    demoStatus.textContent = error.message;
+    setStatus(error.message, { error: true });
+  } finally {
+    busy = false;
+    updateControls();
+  }
+}
+
+async function runDemonstratedSkill() {
+  if (!latestDemonstratedSkillId || !selectedWindowHandle || busy) return;
+  busy = true;
+  updateControls();
+  try {
+    await cancelMission();
+    resetFeedbackView();
+    const body = await api('/api/skills/prepare', {
+      method: 'POST',
+      body: JSON.stringify({
+        windowHandle: selectedWindowHandle,
+        skillId: latestDemonstratedSkillId
+      })
+    });
+    currentSkillRun = {
+      ...body,
+      stepIndex: 0,
+      currentStep: body.currentStep
+    };
+    demoRunButton.hidden = true;
+    showLearnedStep(body.currentStep);
+  } catch (error) {
+    setStatus(`Не удалось подготовить показ: ${error.message}`, { error: true });
+  } finally {
+    busy = false;
+    updateControls();
+  }
+}
+
+windowSelect.addEventListener('focus', () => {
+  if (!busy && !teachingSession) scanWindows();
+});
+
+windowSelect.addEventListener('change', async () => {
+  await cancelMission();
+  await cancelSkillRun();
+  resetFeedbackView();
+  selectedWindowHandle = Number(windowSelect.value) || null;
+  if (selectedWindowHandle) localStorage.setItem('ai-window-handle', String(selectedWindowHandle));
+  await refreshLatestDemonstration();
+  updateControls();
+});
+
+taskInput.addEventListener('input', () => {
+  if (currentMission && taskInput.value.trim() !== currentMission.instruction) cancelMission();
+  resetFeedbackView();
+  taskButton.textContent = currentMission ? 'Следующий шаг' : 'Подготовить первый шаг';
+  updateControls();
+});
+
+taskInput.addEventListener('keydown', (event) => {
+  if (event.ctrlKey && event.key === 'Enter') planNextStep();
+});
+
+taskButton.addEventListener('click', () => planNextStep());
+executeButton.addEventListener('click', executeStep);
+positiveButton.addEventListener('click', () => rateStep('positive'));
+negativeButton.addEventListener('click', () => rateStep('negative'));
+demoButton.addEventListener('click', toggleTeaching);
+demoRunButton.addEventListener('click', runDemonstratedSkill);
+
+safetyToggle.addEventListener('click', async () => {
+  safetyToggle.disabled = true;
+  try {
+    if (paused) {
+      await api('/api/safety/resume', { method: 'POST', body: JSON.stringify({ confirmed: true }) });
+    } else {
+      await api('/api/safety/pause', { method: 'POST', body: JSON.stringify({ reason: 'Остановлено пользователем из простого интерфейса' }) });
+    }
+    await refreshSystemStatus();
+  } catch (error) {
+    setStatus(error.message, { error: true });
+  } finally {
+    safetyToggle.disabled = false;
   }
 });
 
-refreshStatus();
+window.addEventListener('resize', () => {
+  if (!demoLive.hidden) pollTeaching();
+});
+
+await Promise.all([refreshSystemStatus(), scanWindows()]);
+try {
+  const teaching = await api('/api/teach/status');
+  if (teaching.active) {
+    teachingSession = teaching.session;
+    demoButton.textContent = 'Завершить показ';
+    demoButton.classList.add('recording');
+    demoTitle.textContent = 'Демонстрация записывается';
+    demoLive.hidden = false;
+    renderTeachingPreview(teaching.session?.preview);
+    startTeachingPoll();
+  }
+} catch { }
+demoRunButton.hidden = !latestDemonstratedSkillId;
+updateControls();
