@@ -97,6 +97,8 @@ async function refinePlannedClick({ planned, observation, instruction }) {
     return { planned, visualRefinement: null };
   }
 
+  const visualRefinementRequired = planned.grounding?.reason === 'visual_refinement_required';
+
   const width = observation.bounds.width;
   const height = observation.bounds.height;
   const coarsePoint = { x: action.point.x, y: action.point.y };
@@ -118,34 +120,59 @@ async function refinePlannedClick({ planned, observation, instruction }) {
       model: config.lmStudioModel,
       imagePath: crop.outputPath,
       systemPrompt: POINTER_REFINER_SYSTEM_PROMPT,
-      prompt: `Задача: ${instruction}\nНужное действие: ${planned.proposal.reason}\nОжидаемый результат: ${planned.proposal.expectedResult}\nНайди точный центр только нужного элемента в увеличенном фрагменте.`,
+      prompt: `Задача: ${instruction}\nНужное действие: ${planned.proposal.reason}\nЦелевой элемент: ${JSON.stringify(action.targetHint || {})}\nОжидаемый результат: ${planned.proposal.expectedResult}\nНайди точный центр только нужного элемента в увеличенном фрагменте.`,
       maxOutputTokens: 400
     });
     const refinement = normalizePointerRefinement(refinementVision.analysis, crop, observation.bounds);
-    const usable = refinement.targetVisible && refinement.point && refinement.confidence >= 0.55;
+    const combinedConfidence = Math.min(planned.proposal.confidence, refinement.confidence);
+    const usable = refinement.targetVisible && refinement.point && combinedConfidence >= 0.6;
+    const visualRefinement = {
+      applied: usable,
+      coarsePoint,
+      refinedPoint: refinement.point,
+      targetVisible: refinement.targetVisible,
+      confidence: refinement.confidence,
+      combinedConfidence,
+      evidence: refinement.evidence,
+      targetHint: action.targetHint || null,
+      cropPath: crop.outputPath,
+      stats: refinementVision.stats
+    };
+    if (!usable && visualRefinementRequired) {
+      const error = new Error('Visual target could not be verified safely. No action was planned.');
+      error.code = 'invalid_local_plan';
+      error.abortReason = 'visual_target_not_verified';
+      error.visualRefinement = visualRefinement;
+      throw error;
+    }
+    const grounding = usable && visualRefinementRequired ? {
+      ...planned.grounding,
+      adjusted: true,
+      blocked: false,
+      reason: 'visual_target_refined',
+      confidence: combinedConfidence,
+      safePoint: refinement.point,
+      pointMethod: 'vision_refined_point'
+    } : planned.grounding;
     return {
       planned: {
         ...planned,
         proposal: {
           ...planned.proposal,
           action: usable ? { ...action, point: refinement.point } : action,
-          confidence: usable
-            ? Math.min(planned.proposal.confidence, refinement.confidence)
-            : 0
-        }
+          confidence: usable ? combinedConfidence : 0,
+          ...(usable && visualRefinementRequired ? { grounding } : {})
+        },
+        grounding
       },
-      visualRefinement: {
-        applied: usable,
-        coarsePoint,
-        refinedPoint: refinement.point,
-        targetVisible: refinement.targetVisible,
-        confidence: refinement.confidence,
-        evidence: refinement.evidence,
-        cropPath: crop.outputPath,
-        stats: refinementVision.stats
-      }
+      visualRefinement
     };
   } catch (error) {
+    if (visualRefinementRequired) {
+      if (!error.code) error.code = 'invalid_local_plan';
+      if (!error.abortReason) error.abortReason = 'visual_target_not_verified';
+      throw error;
+    }
     return {
       planned: {
         ...planned,

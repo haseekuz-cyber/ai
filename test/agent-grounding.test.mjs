@@ -170,7 +170,7 @@ test('overlapping unrelated candidates remain ambiguous', () => {
   assert.equal(result.abortReason, 'ambiguous_target');
 });
 
-test('non-actionable element blocks click', () => {
+test('non-actionable UIA surface requires visual refinement', () => {
   const result = normalizeAndGround({
     proposal: makeProposal({ targetHint: { name: 'Static label' } }),
     elements: [makeElement({
@@ -178,6 +178,41 @@ test('non-actionable element blocks click', () => {
       className: 'Text',
       controlType: 'Text',
       capabilities: []
+    })],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.reason, 'visual_refinement_required');
+  assert.equal(result.grounding.adjusted, false);
+  assert.equal(result.grounding.confidence, 0);
+});
+
+test('inaccessible UIA surface preserves the semantic target for visual refinement', () => {
+  const proposal = makeProposal({ targetHint: { name: 'Pointer tool', visibleText: 'Pointer' } });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [makeElement({
+      name: 'CorelDRAW',
+      className: 'MainWindow',
+      controlType: 'Window',
+      capabilities: []
+    })],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.reason, 'visual_refinement_required');
+  assert.deepEqual(result.grounding.targetHint, proposal.action.targetHint);
+});
+
+test('visual fallback stays blocked when UIA exposes another actionable control', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({
+      point: pointForScreen(900, 700),
+      targetHint: { name: 'Pointer tool' }
+    }),
+    elements: [makeElement({
+      name: 'Save',
+      bounds: { x: 100, y: 100, width: 200, height: 50 }
     })],
     windowBounds
   });
@@ -290,5 +325,22 @@ test('accepted grounding calls the executor exactly once', async () => {
     execute: async () => { calls += 1; return 'ok'; }
   });
   assert.equal(result, 'ok');
+  assert.equal(calls, 1);
+});
+
+test('verified visual grounding can execute exactly once', async () => {
+  let calls = 0;
+  const result = await executeGroundedAction({
+    action: { type: 'click' },
+    grounding: {
+      adjusted: true,
+      blocked: false,
+      reason: 'visual_target_refined',
+      confidence: 0.7,
+      pointMethod: 'vision_refined_point'
+    },
+    execute: async () => { calls += 1; return 'visual-ok'; }
+  });
+  assert.equal(result, 'visual-ok');
   assert.equal(calls, 1);
 });
