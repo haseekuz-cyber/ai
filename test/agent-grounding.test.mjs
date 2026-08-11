@@ -1,0 +1,294 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  executeGroundedAction,
+  groundPlannerProposal,
+  normalizeAndGround
+} from '../src/agent-grounding.mjs';
+import { normalizePlannerOutput } from '../src/agent-planner.mjs';
+
+const windowBounds = { x: 0, y: 0, width: 1920, height: 1080 };
+
+function pointForScreen(x, y) {
+  return { x: x / (windowBounds.width - 1), y: y / (windowBounds.height - 1) };
+}
+
+function makeProposal({
+  type = 'click',
+  point = pointForScreen(200, 125),
+  targetHint = { name: 'Test Button' },
+  text = 'hello'
+} = {}) {
+  const action = { type, point };
+  if (targetHint) action.targetHint = targetHint;
+  if (type === 'typeText') action.text = text;
+  return {
+    action,
+    observation: 'test',
+    reason: 'test action',
+    expectedResult: 'visible change',
+    risk: { level: 'read_only', reason: 'test' },
+    confidence: 0.8
+  };
+}
+
+function makeElement(overrides = {}) {
+  return {
+    runtimeId: overrides.runtimeId || '',
+    parentRuntimeId: overrides.parentRuntimeId || '',
+    automationId: overrides.automationId || '',
+    name: overrides.name ?? 'Test Button',
+    className: overrides.className ?? 'Button',
+    controlType: overrides.controlType ?? 'Button',
+    bounds: overrides.bounds ?? { x: 100, y: 100, width: 200, height: 50 },
+    enabled: overrides.enabled ?? true,
+    offscreen: overrides.offscreen ?? false,
+    isPassword: overrides.isPassword ?? false,
+    capabilities: overrides.capabilities ?? ['invoke'],
+    clickablePoint: overrides.clickablePoint ?? null
+  };
+}
+
+test('exact automationId binds with lowercase UIA capability', () => {
+  const proposal = makeProposal({ targetHint: { automationId: 'btn_submit', controlType: 'Button' } });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [
+      makeElement({ automationId: 'btn_submit', name: 'Submit' }),
+      makeElement({ automationId: 'btn_cancel', name: 'Cancel' })
+    ],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.target.automationId, 'btn_submit');
+  assert.equal(result.grounding.confidence, 1);
+});
+
+test('missing target identity blocks click', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({ targetHint: null }),
+    elements: [makeElement()],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'missing_target_identity');
+});
+
+test('controlType alone is not accepted as identity', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({ targetHint: { controlType: 'Button' } }),
+    elements: [makeElement()],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'missing_target_identity');
+});
+
+test('planner normalization requires a click identity, not only controlType', () => {
+  assert.throws(() => normalizePlannerOutput({
+    action: {
+      type: 'click',
+      point: { x: 0.5, y: 0.5 },
+      targetHint: { controlType: 'Button' }
+    },
+    confidence: 0.8
+  }), /requires automationId, name, or visibleText/);
+});
+
+test('planner normalization preserves a valid targetHint', () => {
+  const proposal = normalizePlannerOutput({
+    action: {
+      type: 'click',
+      point: { x: 0.5, y: 0.5 },
+      targetHint: { name: 'Save', controlType: 'Button' }
+    },
+    confidence: 0.8
+  });
+  assert.deepEqual(proposal.action.targetHint, { name: 'Save', controlType: 'Button' });
+});
+
+test('no semantic match blocks click', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({ targetHint: { automationId: 'expected' } }),
+    elements: [makeElement({ automationId: 'different' })],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'no_semantic_match');
+});
+
+test('provided controlType is enforced as a constraint', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({ targetHint: { name: 'Save', controlType: 'Button' } }),
+    elements: [makeElement({ name: 'Save', controlType: 'MenuItem' })],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'no_semantic_match');
+});
+
+test('nested semantic tie selects the actual descendant', () => {
+  const proposal = makeProposal({
+    point: pointForScreen(180, 170),
+    targetHint: { name: 'Save', controlType: 'Button' }
+  });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [
+      makeElement({
+        runtimeId: 'outer',
+        name: 'Save',
+        bounds: { x: 100, y: 100, width: 300, height: 200 }
+      }),
+      makeElement({
+        runtimeId: 'inner',
+        parentRuntimeId: 'outer',
+        name: 'Save',
+        bounds: { x: 150, y: 150, width: 100, height: 50 }
+      })
+    ],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.target.runtimeId, 'inner');
+});
+
+test('overlapping unrelated candidates remain ambiguous', () => {
+  const proposal = makeProposal({
+    point: pointForScreen(240, 125),
+    targetHint: { name: 'Save' }
+  });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [
+      makeElement({ name: 'Save', bounds: { x: 100, y: 100, width: 150, height: 50 } }),
+      makeElement({ name: 'Save', bounds: { x: 230, y: 110, width: 40, height: 30 } })
+    ],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'ambiguous_target');
+});
+
+test('non-actionable element blocks click', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({ targetHint: { name: 'Static label' } }),
+    elements: [makeElement({
+      name: 'Static label',
+      className: 'Text',
+      controlType: 'Text',
+      capabilities: []
+    })],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'no_actionable_target');
+});
+
+test('lowercase toggle capability makes a checkbox actionable', () => {
+  const result = normalizeAndGround({
+    proposal: makeProposal({ targetHint: { name: 'Remember me', controlType: 'CheckBox' } }),
+    elements: [makeElement({
+      name: 'Remember me',
+      controlType: 'CheckBox',
+      capabilities: ['toggle']
+    })],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+});
+
+test('disabled and offscreen elements block clicks', () => {
+  for (const element of [makeElement({ enabled: false }), makeElement({ offscreen: true })]) {
+    const result = normalizeAndGround({ proposal: makeProposal(), elements: [element], windowBounds });
+    assert.equal(result.blocked, true);
+    assert.equal(result.abortReason, 'no_actionable_target');
+  }
+});
+
+test('UIA clickablePoint is used only when it is inside the matched element', () => {
+  const proposal = makeProposal({ targetHint: { name: 'Test Button' } });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [makeElement({ clickablePoint: { x: 250, y: 130 } })],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.pointMethod, 'uia_clickable_point');
+  assert.deepEqual(result.grounding.safePoint, pointForScreen(250, 130));
+});
+
+test('fallback point is deterministic and stays near the fresh planned point', () => {
+  const proposal = makeProposal({ point: pointForScreen(115, 112) });
+  const element = makeElement();
+  const first = normalizeAndGround({ proposal, elements: [element], windowBounds });
+  const second = normalizeAndGround({ proposal, elements: [element], windowBounds });
+  assert.equal(first.grounding.pointMethod, 'planned_interior_point');
+  assert.deepEqual(first.grounding.safePoint, second.grounding.safePoint);
+  assert.deepEqual(first.grounding.safePoint, proposal.action.point);
+});
+
+test('typeText keeps legacy single editable target grounding with lowercase value capability', () => {
+  const proposal = makeProposal({ type: 'typeText', point: pointForScreen(1500, 900), targetHint: null });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [makeElement({
+      name: 'Message',
+      className: 'Edit',
+      controlType: 'Edit',
+      capabilities: ['value']
+    })],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.reason, 'single_editable_target');
+  assert.notDeepEqual(result.proposal.action.point, proposal.action.point);
+});
+
+test('ambiguous editable targets block typeText', () => {
+  const proposal = makeProposal({ type: 'typeText', point: pointForScreen(1500, 900), targetHint: null });
+  const result = normalizeAndGround({
+    proposal,
+    elements: [
+      makeElement({ name: 'First', controlType: 'Edit', capabilities: ['value'] }),
+      makeElement({
+        name: 'Second',
+        controlType: 'Edit',
+        capabilities: ['value'],
+        bounds: { x: 400, y: 100, width: 200, height: 50 }
+      })
+    ],
+    windowBounds
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.abortReason, 'ambiguous_editable_targets');
+});
+
+test('groundPlannerProposal throws before later planning stages when blocked', () => {
+  assert.throws(() => groundPlannerProposal({
+    proposal: makeProposal({ targetHint: null }),
+    elements: [makeElement()],
+    windowBounds
+  }), (error) => error.code === 'invalid_local_plan' && error.abortReason === 'missing_target_identity');
+});
+
+test('blocked grounding never calls the executor', async () => {
+  let calls = 0;
+  await assert.rejects(() => executeGroundedAction({
+    action: { type: 'click' },
+    grounding: { blocked: true, confidence: 1 },
+    execute: async () => { calls += 1; }
+  }), (error) => error.code === 'grounding_blocked');
+  assert.equal(calls, 0);
+});
+
+test('accepted grounding calls the executor exactly once', async () => {
+  let calls = 0;
+  const result = await executeGroundedAction({
+    action: { type: 'click' },
+    grounding: { blocked: false, confidence: 0.9 },
+    execute: async () => { calls += 1; return 'ok'; }
+  });
+  assert.equal(result, 'ok');
+  assert.equal(calls, 1);
+});

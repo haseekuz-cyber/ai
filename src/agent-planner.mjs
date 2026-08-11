@@ -13,7 +13,8 @@ Do not claim that the action has already happened. Return JSON only, without mar
     "to":{"x":0.0,"y":0.0},
     "delta":-120,
     "durationMs":350,
-    "text":"text to enter"
+    "text":"text to enter",
+    "targetHint":{"automationId":"optional","name":"optional","controlType":"optional","visibleText":"optional"}
   },
   "reason":"why this is the next action",
   "expectedResult":"visible result expected after the action",
@@ -21,6 +22,7 @@ Do not claim that the action has already happened. Return JSON only, without mar
   "confidence":0.0
 }
 Coordinates are normalized to the screenshot from 0 to 1. Include only fields needed by the chosen action.
+For click/doubleClick actions, ALWAYS include targetHint with automationId, name, or visibleText to identify the target. controlType may be added as a constraint, but controlType alone is not an identity.
 Use done when the instruction is visibly complete. Use wait only for a visible loading state.
 Opening a chat, sending a message, publishing, purchasing, deleting, overwriting files, changing account/security settings, or confirming a dialog is external_effect or dangerous.
 If a target is not clearly visible, return wait or done with low confidence instead of guessing.`;
@@ -113,6 +115,24 @@ export function normalizePlannerOutput(value, screenshotBounds = null) {
     action.text = rawAction.text;
   }
   if (type === 'wait') action.durationMs = Math.min(Math.max(Math.round(finite(rawAction.durationMs ?? 750, 'action.durationMs')), 50), 5_000);
+
+  if (['click', 'doubleClick'].includes(type)) {
+    const rawHint = rawAction.targetHint;
+    if (!rawHint || typeof rawHint !== 'object' || Array.isArray(rawHint)) {
+      throw new TypeError('action.targetHint is required for click actions.');
+    }
+    const hintKeys = ['automationId', 'name', 'controlType', 'visibleText'];
+    const validHint = {};
+    for (const key of hintKeys) {
+      if (typeof rawHint[key] === 'string' && rawHint[key].trim().length > 0) {
+        validHint[key] = rawHint[key].trim();
+      }
+    }
+    if (!['automationId', 'name', 'visibleText'].some((key) => validHint[key])) {
+      throw new TypeError('action.targetHint requires automationId, name, or visibleText.');
+    }
+    action.targetHint = validHint;
+  }
 
   const risk = value.risk && typeof value.risk === 'object' ? value.risk : {};
   const riskLevel = riskLevels.has(risk.level) ? risk.level : 'dangerous';

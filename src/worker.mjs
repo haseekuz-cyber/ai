@@ -45,7 +45,7 @@ import {
 import { appendAuditEvent, readAuditEvents } from './audit-log.mjs';
 import { startSafetyHotkey } from './safety-hotkey.mjs';
 import { evaluateActionPolicy, evaluateLearnedStepPolicy } from './action-policy.mjs';
-import { groundPlannedAction } from './agent-grounding.mjs';
+import { executeGroundedAction, groundPlannerProposal } from './agent-grounding.mjs';
 import { normalizeSkillRecommendation, publicSkillCandidate, SKILL_ROUTER_SYSTEM_PROMPT } from './skill-router.mjs';
 import { waitForSettledObservation } from './observation-settling.mjs';
 import { cropImageRegion } from './image-region.mjs';
@@ -399,7 +399,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     maxOutputTokens: 1_200
   });
 
-  const normalizeAndGround = (localVision) => {
+  const normalizeAndGroundStep = (localVision) => {
     let proposal;
     try {
       proposal = normalizePlannerOutput(localVision.analysis, observation.bounds);
@@ -408,15 +408,14 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
       error.rawLocalModelOutput = localVision.raw;
       throw error;
     }
-    const grounded = groundPlannedAction({
+    return groundPlannerProposal({
       proposal,
       elements: inspected.elements,
       windowBounds: observation.bounds
     });
-    return { proposal: grounded.proposal, grounding: grounded.grounding };
   };
 
-  let planned = normalizeAndGround(vision);
+  let planned = normalizeAndGroundStep(vision);
   let refined = await refinePlannedClick({ planned, observation, instruction });
   planned = refined.planned;
   let visualRefinement = refined.visualRefinement;
@@ -432,7 +431,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
       prompt: `Задача пользователя: ${instruction}${historyPrompt}\nЗапрещено повторять проваленное действие: ${JSON.stringify(repeatedFailure.action)}. Выбери другую точку минимум в 1% размера окна или другой метод. Предложи только один следующий видимый шаг.`,
       maxOutputTokens: 1_200
     });
-    planned = normalizeAndGround(vision);
+    planned = normalizeAndGroundStep(vision);
     refined = await refinePlannedClick({ planned, observation, instruction });
     planned = refined.planned;
     visualRefinement = refined.visualRefinement;
@@ -1102,8 +1101,16 @@ const server = http.createServer(async (request, response) => {
             forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
           });
           pointerPoint = bridgeRequest.action === 'drag' ? bridgeRequest.to : bridgeRequest.point;
-          if (pointerPoint && config.pointerOverlayEnabled) await moveVirtualPointer(config.pointerStatePath, pointerPoint);
-          actionResult = await runPointerAction(config.pointerBridgeScript, bridgeRequest, { timeoutMs: 10_000 });
+          actionResult = await executeGroundedAction({
+            action: plan.proposal.action,
+            grounding: plan.grounding,
+            execute: async () => {
+              if (pointerPoint && config.pointerOverlayEnabled) {
+                await moveVirtualPointer(config.pointerStatePath, pointerPoint);
+              }
+              return runPointerAction(config.pointerBridgeScript, bridgeRequest, { timeoutMs: 10_000 });
+            }
+          });
         }
       } catch (error) {
         const mission = plan.missionId ? missions.get(plan.missionId) : null;
