@@ -77,6 +77,10 @@ function isActionable(element) {
     actionableControls.has(controlType);
 }
 
+function hasActionableElements(elements) {
+  return Array.isArray(elements) && elements.some((element) => isActionable(element));
+}
+
 function targetSummary(target) {
   return {
     runtimeId: target.runtimeId || null,
@@ -285,7 +289,22 @@ export function normalizeAndGround({ proposal, elements = [], windowBounds }) {
 
   const proposedScreenPoint = screenPoint(proposal.action.point, windowBounds);
   const selection = selectSemanticTarget(elements, targetHint, proposedScreenPoint);
-  if (selection.blocked) return blockedResult(proposal, selection.reason);
+  if (selection.blocked) {
+    const inspectedButInaccessible = selection.reason === 'no_actionable_target' &&
+      elements.length > 0 && !hasActionableElements(elements);
+    if (inspectedButInaccessible) {
+      const grounding = {
+        adjusted: false,
+        blocked: false,
+        reason: 'visual_refinement_required',
+        targetHint,
+        originalPoint: proposal.action.point,
+        confidence: 0
+      };
+      return { proposal, grounding, blocked: false };
+    }
+    return blockedResult(proposal, selection.reason);
+  }
   if (selection.confidence < MIN_CONFIDENCE_THRESHOLD) {
     return blockedResult(proposal, 'low_confidence', {
       confidence: selection.confidence,
