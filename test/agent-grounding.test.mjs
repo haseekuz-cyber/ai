@@ -5,7 +5,7 @@ import {
   groundPlannerProposal,
   normalizeAndGround
 } from '../src/agent-grounding.mjs';
-import { normalizePlannerOutput } from '../src/agent-planner.mjs';
+import { normalizePlannerOutput, PLANNER_SYSTEM_PROMPT } from '../src/agent-planner.mjs';
 
 const windowBounds = { x: 0, y: 0, width: 1920, height: 1080 };
 
@@ -185,6 +185,23 @@ test('non-actionable UIA surface requires visual refinement', () => {
   assert.equal(result.grounding.reason, 'visual_refinement_required');
   assert.equal(result.grounding.adjusted, false);
   assert.equal(result.grounding.confidence, 0);
+});
+
+test('planner guidance distinguishes canvas gestures from control clicks', () => {
+  assert.match(PLANNER_SYSTEM_PROMPT, /use drag/i);
+  assert.match(PLANNER_SYSTEM_PROMPT, /fresh screenshot as the source of truth/i);
+  assert.match(PLANNER_SYSTEM_PROMPT, /Do not use click on an empty canvas/i);
+});
+
+test('planner rejects a zero-distance drag', () => {
+  assert.throws(() => normalizePlannerOutput({
+    action: {
+      type: 'drag',
+      from: { x: 0.5, y: 0.5 },
+      to: { x: 0.5, y: 0.5 }
+    },
+    confidence: 0.9
+  }), /visible non-zero drag/);
 });
 
 test('inaccessible UIA surface preserves the semantic target for visual refinement', () => {

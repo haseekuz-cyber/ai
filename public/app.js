@@ -72,7 +72,11 @@ async function api(path, options = {}) {
     }
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(body.message || body.error || `HTTP ${response.status}`);
+    error.body = body;
+    throw error;
+  }
   return body;
 }
 
@@ -434,8 +438,8 @@ planNextButton.addEventListener('click', async () => {
     }
     showJson(body);
   } catch (error) {
-    agentPlanStatus.textContent = 'План не создан.';
-    showJson({ error: error.message });
+    agentPlanStatus.textContent = `План безопасно остановлен: ${error.message}`;
+    showJson(error.body || { error: error.message });
   } finally {
     planNextButton.disabled = !currentWindowHandle || Boolean(currentAgentPlan);
   }

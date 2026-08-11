@@ -24,6 +24,10 @@ Do not claim that the action has already happened. Return JSON only, without mar
 Coordinates are normalized to the screenshot from 0 to 1. Include only fields needed by the chosen action.
 For click/doubleClick actions, ALWAYS include targetHint with automationId, name, or visibleText to identify the target. controlType may be added as a constraint, but controlType alone is not an identity.
 Use done when the instruction is visibly complete. Use wait only for a visible loading state.
+Treat the fresh screenshot as the source of truth. A previous successful step may be repeated only when its visible result is no longer present and the state must be restored.
+When a drawing or shape tool is active and the task requires creating or resizing something on a canvas, use drag with visible start and end points. Do not use click on an empty canvas as a substitute for a drawing gesture.
+For drag, from and to must be visibly different points. When creating a shape, first create a visible non-zero shape; exact dimensions can be set in a later step through visible size fields.
+Use click only for a discrete visible control, object, or position that can be verified locally.
 Opening a chat, sending a message, publishing, purchasing, deleting, overwriting files, changing account/security settings, or confirming a dialog is external_effect or dangerous.
 If a target is not clearly visible, return wait or done with low confidence instead of guessing.`;
 
@@ -106,6 +110,9 @@ export function normalizePlannerOutput(value, screenshotBounds = null) {
   if (type === 'drag') {
     action.from = normalizedPoint(rawAction.from, 'action.from', screenshotBounds);
     action.to = normalizedPoint(rawAction.to, 'action.to', screenshotBounds);
+    if (Math.hypot(action.to.x - action.from.x, action.to.y - action.from.y) < 0.02) {
+      throw new TypeError('action.from and action.to must describe a visible non-zero drag.');
+    }
     action.durationMs = Math.min(Math.max(Math.round(finite(rawAction.durationMs ?? 350, 'action.durationMs')), 50), 5_000);
   }
   if (type === 'scroll') action.delta = Math.min(Math.max(Math.round(finite(rawAction.delta ?? -120, 'action.delta')), -1_200), 1_200);

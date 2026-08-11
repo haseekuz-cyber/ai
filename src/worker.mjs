@@ -46,6 +46,7 @@ import { appendAuditEvent, readAuditEvents } from './audit-log.mjs';
 import { startSafetyHotkey } from './safety-hotkey.mjs';
 import { evaluateActionPolicy, evaluateLearnedStepPolicy } from './action-policy.mjs';
 import { executeGroundedAction, groundPlannerProposal } from './agent-grounding.mjs';
+import { sameWindowContext } from './window-context.mjs';
 import { normalizeSkillRecommendation, publicSkillCandidate, SKILL_ROUTER_SYSTEM_PROMPT } from './skill-router.mjs';
 import { waitForSettledObservation } from './observation-settling.mjs';
 import { cropImageRegion } from './image-region.mjs';
@@ -143,6 +144,8 @@ async function refinePlannedClick({ planned, observation, instruction }) {
       error.code = 'invalid_local_plan';
       error.abortReason = 'visual_target_not_verified';
       error.visualRefinement = visualRefinement;
+      error.plannedProposal = planned.proposal;
+      error.rawLocalModelOutput = refinementVision.raw;
       throw error;
     }
     const grounding = usable && visualRefinementRequired ? {
@@ -395,8 +398,8 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     boundedUiRequest({ operation: 'inspect', windowHandle, maxDepth: 8, maxElements: 1_000 }),
     { timeoutMs: 30_000 }
   );
-  if (mission && inspected.window.processId !== mission.processId) {
-    const error = new Error('The mission application was restarted. Start a new mission.');
+  if (mission && !sameWindowContext(inspected.window, mission.window)) {
+    const error = new Error('The target window or active document changed. Start a new mission for the current document.');
     error.code = 'stale_mission';
     throw error;
   }
@@ -422,7 +425,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     model: config.lmStudioModel,
     imagePath: observation.outputPath,
     systemPrompt: PLANNER_SYSTEM_PROMPT,
-    prompt: `Задача пользователя: ${instruction}${historyPrompt}\nПредложи только следующий видимый шаг. Не повторяй успешные шаги. Если предыдущий шаг не прошёл проверку, не повторяй ту же координату или метод.`,
+    prompt: `Задача пользователя: ${instruction}${historyPrompt}\nПредложи только следующий видимый шаг по свежему снимку. Не повторяй успешный шаг, если его результат всё ещё виден. Если свежий снимок противоречит истории, сначала восстанови необходимое состояние. Для создания или изменения фигуры на холсте используй drag, а не click по пустой области. Если предыдущий шаг не прошёл проверку, не повторяй ту же координату или метод.`,
     maxOutputTokens: 1_200
   });
 
@@ -443,13 +446,30 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
   };
 
   let planned = normalizeAndGroundStep(vision);
-  let refined = await refinePlannedClick({ planned, observation, instruction });
-  planned = refined.planned;
-  let visualRefinement = refined.visualRefinement;
-  let repeatedFailure = findRepeatedFailedAction(planned.proposal.action, history);
+  let refined;
+  let visualRefinement = null;
   let recoveryAttempts = 0;
-  if (repeatedFailure) {
+  try {
+    refined = await refinePlannedClick({ planned, observation, instruction });
+  } catch (error) {
+    if (error.abortReason !== 'visual_target_not_verified') throw error;
     recoveryAttempts = 1;
+    vision = await analyzeImageWithLmStudio({
+      baseUrl: config.lmStudioBaseUrl,
+      model: config.lmStudioModel,
+      imagePath: observation.outputPath,
+      systemPrompt: PLANNER_SYSTEM_PROMPT,
+      prompt: `Задача пользователя: ${instruction}${historyPrompt}\nПредыдущий предложенный click отклонён: целевой элемент не виден рядом с точкой ${JSON.stringify(error.plannedProposal?.action?.point || null)}. Заново проверь свежий снимок. Если нужно рисовать или изменять фигуру на холсте, ОБЯЗАТЕЛЬНО верни action.type=drag. Точки from и to должны быть разными, видимыми и находиться на рабочей области; расстояние между ними должно быть не менее 5% размера окна. Сначала создай видимую фигуру, а точные размеры задай следующим шагом через поля размеров. Если состояние из успешного прошлого шага больше не видно, сначала восстанови его. Click по пустому Canvas запрещён. Предложи только один следующий шаг.`,
+      maxOutputTokens: 1_200
+    });
+    planned = normalizeAndGroundStep(vision);
+    refined = await refinePlannedClick({ planned, observation, instruction });
+  }
+  planned = refined.planned;
+  visualRefinement = refined.visualRefinement;
+  let repeatedFailure = findRepeatedFailedAction(planned.proposal.action, history);
+  if (repeatedFailure) {
+    recoveryAttempts += 1;
     vision = await analyzeImageWithLmStudio({
       baseUrl: config.lmStudioBaseUrl,
       model: config.lmStudioModel,
@@ -1009,6 +1029,8 @@ const server = http.createServer(async (request, response) => {
         if (error.code === 'invalid_local_plan') {
           return sendJson(response, 422, {
             error: 'invalid_local_plan', message: error.message, rawLocalModelOutput: error.rawLocalModelOutput,
+            abortReason: error.abortReason, plannedProposal: error.plannedProposal,
+            visualRefinement: error.visualRefinement,
             mission: publicMission(mission)
           });
         }
@@ -1054,7 +1076,10 @@ const server = http.createServer(async (request, response) => {
         return sendJson(response, 422, {
           error: 'invalid_local_plan',
           message: error.message,
-          rawLocalModelOutput: error.rawLocalModelOutput
+          rawLocalModelOutput: error.rawLocalModelOutput,
+          abortReason: error.abortReason,
+          plannedProposal: error.plannedProposal,
+          visualRefinement: error.visualRefinement
         });
       }
     }
@@ -1101,10 +1126,10 @@ const server = http.createServer(async (request, response) => {
         boundedUiRequest({ operation: 'inspect', windowHandle: plan.window.nativeWindowHandle, maxDepth: 0, maxElements: 1 }),
         { timeoutMs: 30_000 }
       );
-      if (inspected.window.processId !== plan.window.processId || !sameBounds(inspected.window.bounds, plan.window.bounds)) {
+      if (!sameWindowContext(inspected.window, plan.window) || !sameBounds(inspected.window.bounds, plan.window.bounds)) {
         return sendJson(response, 409, {
           error: 'stale_plan',
-          message: 'The target window changed position, size, or process after planning. Create a new plan.'
+          message: 'The target window, active document, position, size, or process changed after planning. Create a new plan.'
         });
       }
 
