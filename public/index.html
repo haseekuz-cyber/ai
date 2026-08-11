@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Workstation</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">INDEPENDENT AI SEAT · PROTOTYPE</p>
+        <h1>AI Workstation</h1>
+        <p class="subtitle">Рабочее место ИИ на втором мониторе без перехвата вашей мыши.</p>
+      </header>
+
+      <section class="status-card" aria-live="polite">
+        <div>
+          <span class="status-dot pending" id="status-dot"></span>
+          <strong id="status-title">Проверяем Worker…</strong>
+          <p id="status-detail">Подключение к локальному исполнителю.</p>
+        </div>
+        <button id="refresh" class="secondary">Обновить</button>
+      </section>
+
+      <section class="status-card safety-card" aria-live="polite">
+        <div>
+          <strong id="safety-title">Действия ИИ разрешены</strong>
+          <p id="safety-detail">Кнопка или Ctrl+Shift+F12 блокирует любые новые клики, ввод и шаги навыков.</p>
+        </div>
+        <div class="safety-controls">
+          <button id="pause-ai" class="danger">СТОП ИИ</button>
+          <button id="resume-ai" class="secondary" disabled>Возобновить</button>
+          <button id="show-audit" class="secondary">Журнал действий</button>
+        </div>
+      </section>
+
+      <section class="notice-card">
+        <strong>Безопасный режим MVP</strong>
+        <p>Кнопки, поля и безопасные клавиши адресуются прямо выбранному окну. Физический курсор и системный ввод не используются, а действия ограничены вторым монитором.</p>
+      </section>
+
+      <section class="workspace seat-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">AI DISPLAY</p>
+            <h2>Окна второго экрана</h2>
+          </div>
+          <button id="scan-windows" class="secondary">Найти окна</button>
+        </div>
+
+        <div class="window-picker">
+          <select id="window-select" aria-label="Окно второго экрана">
+            <option value="">Сначала нажмите «Найти окна»</option>
+          </select>
+          <button id="inspect-window" disabled>Показать элементы</button>
+          <button id="analyze-window" class="secondary" disabled>Понять изображение</button>
+          <button id="audit-telegram" class="secondary" disabled>Найти непрочитанные</button>
+        </div>
+        <p id="display-detail" class="muted">Ожидаем данные о втором мониторе.</p>
+
+        <div id="element-list" class="element-list">
+          <p class="empty-state">Здесь появятся доступные кнопки и поля выбранной программы.</p>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <label for="prompt">Задача для цифрового сотрудника</label>
+        <textarea id="prompt" rows="4" placeholder="Например: проверь непрочитанные чаты и подготовь сводку"></textarea>
+        <div class="agent-controls">
+          <button id="plan-next" disabled>Qwen: начать многошаговую задачу</button>
+          <button id="execute-plan" class="danger" disabled>Подтвердить и выполнить</button>
+          <button id="cancel-mission" class="secondary" disabled>Остановить задачу</button>
+        </div>
+        <p id="agent-plan-status" class="muted">Выберите окно и опишите задачу. Локальная модель сначала покажет план без выполнения.</p>
+        <div class="teach-controls">
+          <input id="skill-name" type="text" maxlength="128" placeholder="Название навыка (например: подготовить макет к печати)" />
+          <button id="start-teaching" class="secondary" disabled>Начать показ</button>
+          <button id="stop-teaching" disabled>Завершить и сохранить</button>
+          <button id="cancel-teaching" class="secondary" disabled>Отменить запись</button>
+        </div>
+        <p id="teaching-status" class="muted">Во время показа записываются только действия внутри выбранного окна второго монитора.</p>
+        <div class="skill-controls">
+          <select id="skill-select" aria-label="Выученный навык">
+            <option value="">Сохранённых навыков пока нет</option>
+          </select>
+          <button id="refresh-skills" class="secondary">Обновить навыки</button>
+          <button id="recommend-skill" class="secondary" disabled>Подобрать по задаче</button>
+          <button id="prepare-skill" class="secondary" disabled>Подготовить навык</button>
+          <button id="execute-skill-step" disabled>Выполнить следующий шаг</button>
+          <button id="cancel-skill-run" class="secondary" disabled>Остановить навык</button>
+        </div>
+        <p id="skill-status" class="muted">Каждый выученный шаг отдельно показывается и требует подтверждения.</p>
+        <div class="controls">
+          <select id="mode" aria-label="Режим выполнения">
+            <option value="inspect">Только диагностика</option>
+            <option value="dry-run" selected>Подготовить план без действий</option>
+            <option value="execute">Выполнение без подтверждений — запрещено</option>
+          </select>
+          <button id="submit">Передать Worker</button>
+        </div>
+        <p class="muted">Локальная модель анализирует только выбранное окно. Любые действия и отправка сообщений требуют отдельного подтверждения.</p>
+      </section>
+
+      <section class="result-card isolation-card">
+        <h2>Независимое рабочее место AI</h2>
+        <div class="session-pair">
+          <span>Windows-сеанс: <strong id="owner-session">—</strong></span>
+          <span>Монитор AI: <strong id="worker-session">—</strong></span>
+          <span>Метод: <strong id="control-method">—</strong></span>
+        </div>
+        <ul id="isolation-checks"></ul>
+      </section>
+
+      <section class="result-card">
+        <h2>Журнал</h2>
+        <pre id="result">Приложение запускается…</pre>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

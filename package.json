@@ -1,0 +1,16 @@
+{
+  "name": "ai-workstation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Windows AI workplace with independent second-monitor window control",
+  "scripts": {
+    "controller": "node src/controller.mjs",
+    "worker": "node src/worker.mjs",
+    "vision:test": "node scripts/check-lmstudio-vision.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

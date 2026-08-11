@@ -1,0 +1,278 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #090b10;
+  color: #f5f7fb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 15% 10%, rgba(77, 95, 255, 0.22), transparent 34rem),
+    radial-gradient(circle at 85% 80%, rgba(38, 204, 153, 0.12), transparent 28rem),
+    #090b10;
+}
+
+button, textarea, select { font: inherit; }
+
+.shell {
+  width: min(920px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 64px 0;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: #8fa0ff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(40px, 8vw, 72px);
+  letter-spacing: -0.055em;
+}
+
+.subtitle {
+  margin: 14px 0 34px;
+  color: #aab2c4;
+  font-size: 18px;
+}
+
+.status-card, .workspace, .result-card, .notice-card {
+  border: 1px solid #252a36;
+  border-radius: 18px;
+  background: rgba(19, 22, 30, 0.84);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.28);
+}
+
+.notice-card {
+  margin-top: 18px;
+  padding: 18px 22px;
+  border-color: rgba(47, 211, 155, 0.35);
+  background: rgba(26, 57, 50, 0.46);
+}
+
+.notice-card p { margin: 7px 0 0; color: #b5c8c2; line-height: 1.5; }
+
+.status-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 22px;
+}
+
+.safety-card { margin-top: 18px; border-color: rgba(255, 99, 118, 0.35); }
+.safety-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.safety-controls .danger { font-size: 15px; }
+
+.status-card strong { margin-left: 8px; }
+.status-card p { margin: 7px 0 0 24px; color: #929bad; }
+
+.status-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #8790a2;
+}
+
+.status-dot.ready { background: #2fd39b; box-shadow: 0 0 18px rgba(47, 211, 155, 0.7); }
+.status-dot.error { background: #ff6376; }
+.status-dot.pending { background: #ffbf58; }
+
+.workspace { margin-top: 18px; padding: 24px; }
+.workspace label { display: block; margin-bottom: 12px; font-weight: 650; }
+.workspace h2 { margin: 0; font-size: 22px; }
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.window-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.window-picker select { padding: 12px 14px; }
+
+.muted {
+  margin: 11px 0 0;
+  color: #8f98aa;
+  font-size: 13px;
+}
+
+.element-list {
+  display: grid;
+  gap: 10px;
+  max-height: 540px;
+  margin-top: 20px;
+  overflow: auto;
+}
+
+.empty-state {
+  margin: 0;
+  padding: 20px;
+  border: 1px dashed #353b49;
+  border-radius: 12px;
+  color: #8f98aa;
+  text-align: center;
+}
+
+.element-card {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(240px, auto);
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid #2a303d;
+  border-radius: 12px;
+  background: #10141c;
+}
+
+.element-description { min-width: 0; }
+.element-description strong, .element-description small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.element-description small { margin-top: 5px; color: #828da1; }
+
+.element-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.element-actions input {
+  min-width: 120px;
+  border: 1px solid #313746;
+  border-radius: 9px;
+  background: #090c12;
+  color: #f5f7fb;
+  padding: 8px 10px;
+}
+
+button.compact { padding: 8px 11px; border-radius: 9px; font-size: 13px; }
+button:disabled { cursor: not-allowed; filter: grayscale(0.7); opacity: 0.5; }
+
+textarea, select {
+  width: 100%;
+  border: 1px solid #313746;
+  border-radius: 12px;
+  background: #0d1017;
+  color: #f5f7fb;
+  outline: none;
+}
+
+textarea { resize: vertical; padding: 16px; line-height: 1.5; }
+textarea:focus, select:focus { border-color: #7183ff; box-shadow: 0 0 0 3px rgba(113, 131, 255, 0.15); }
+
+.controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.agent-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(200px, auto) auto;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.teach-controls {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto auto auto;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.teach-controls input {
+  min-width: 0;
+  border: 1px solid #313746;
+  border-radius: 12px;
+  background: #0d1017;
+  color: #f5f7fb;
+  padding: 12px 14px;
+  outline: none;
+}
+
+.teach-controls input:focus { border-color: #7183ff; box-shadow: 0 0 0 3px rgba(113, 131, 255, 0.15); }
+
+.skill-controls {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto auto auto auto auto;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.skill-controls select { padding: 12px 14px; }
+
+button.danger {
+  border: 1px solid rgba(255, 99, 118, 0.55);
+  background: rgba(134, 39, 55, 0.88);
+}
+
+select { padding: 0 14px; }
+
+button {
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 18px;
+  background: #7183ff;
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.08); }
+button.secondary { border: 1px solid #343a49; background: #171b24; }
+
+.result-card { margin-top: 18px; padding: 24px; }
+.result-card h2 { margin: 0 0 14px; font-size: 16px; }
+
+pre {
+  min-height: 160px;
+  margin: 0;
+  overflow: auto;
+  color: #b9c2d6;
+  font: 13px/1.55 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+.session-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  color: #aab2c4;
+}
+
+.isolation-card ul {
+  display: grid;
+  gap: 9px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.isolation-card li { color: #aab2c4; }
+.isolation-card .check-pass { color: #55d9aa; }
+.isolation-card .check-fail { color: #c3cada; }
+
+@media (max-width: 620px) {
+  .shell { padding: 36px 0; }
+  .status-card { align-items: flex-start; }
+  .controls, .agent-controls, .teach-controls, .skill-controls { grid-template-columns: 1fr; }
+  .window-picker, .element-card { grid-template-columns: 1fr; }
+  .element-actions { justify-content: flex-start; flex-wrap: wrap; }
+  select { padding: 12px 14px; }
+}
