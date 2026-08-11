@@ -1,3 +1,5 @@
+import { normalizeInputModifiers } from './input-modifiers.mjs';
+
 const supportedStepTypes = new Set(['click', 'doubleClick', 'scroll', 'drag', 'typeText', 'pressKey']);
 
 export function normalizeSkillId(value) {
@@ -102,12 +104,14 @@ export function learnedStepToPointerAction(step, bounds, windowHandle) {
     return { ...common, point: screenPoint(step.point, bounds), delta: Math.min(Math.max(Math.round(Number(step.delta) || 0), -1_200), 1_200) };
   }
   if (step.type === 'drag') {
+    const modifiers = normalizeInputModifiers(step.modifiers, { label: 'learned step modifiers' });
     return {
       ...common,
       from: screenPoint(step.from, bounds),
       to: screenPoint(step.to, bounds),
       durationMs: Math.min(Math.max(Math.round(Number(step.durationMs) || 350), 50), 5_000),
-      button: step.button === 'right' ? 'right' : 'left'
+      button: step.button === 'right' ? 'right' : 'left',
+      ...(modifiers.length > 0 ? { modifiers } : {})
     };
   }
   if (step.type === 'typeText') {
@@ -134,6 +138,8 @@ export function publicLearnedStep(step) {
     delta: step.delta ?? null,
     durationMs: step.durationMs ?? null,
     button: step.button ?? null,
+    modifiers: step.type === 'drag' ? normalizeInputModifiers(step.modifiers, { label: 'learned step modifiers' }) : [],
+    trajectoryMode: step.type === 'drag' ? step.trajectoryMode ?? 'adaptive' : null,
     text: step.type === 'typeText' ? step.text : null,
     key: step.type === 'pressKey' ? step.key : null,
     requiresConfirmation: true

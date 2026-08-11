@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { normalizeInputModifiers } from './input-modifiers.mjs';
 
 const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
@@ -24,6 +25,14 @@ export function normalizePointToWindow(point, bounds) {
     x: Math.min(1, Math.max(0, (finite(point?.x, 'point.x') - finite(bounds.x, 'bounds.x')) / width)),
     y: Math.min(1, Math.max(0, (finite(point?.y, 'point.y') - finite(bounds.y, 'bounds.y')) / height))
   };
+}
+
+export function classifyTrajectoryMode(event, target = null) {
+  const explicit = String(event?.trajectoryMode || '');
+  if (['exact', 'adaptive', 'optional', 'replaceable'].includes(explicit)) return explicit;
+  const controlType = String(event?.controlType || target?.controlType || '').toLocaleLowerCase();
+  if (!target || ['pane', 'canvas', 'document'].includes(controlType)) return 'adaptive';
+  return 'replaceable';
 }
 
 function contains(bounds, x, y) {
@@ -74,6 +83,9 @@ export function pointerActionToTeachingEvent({ action, elements = [], atMs = 0 }
     event.toY = Number(action.to?.y);
     event.durationMs = action.durationMs;
     event.button = action.button === 'right' ? 'right' : 'left';
+    const modifiers = normalizeInputModifiers(action.modifiers);
+    if (modifiers.length > 0) event.modifiers = modifiers;
+    event.trajectoryMode = classifyTrajectoryMode(action, target);
   }
   if (action.action === 'pressKey') event.key = action.key;
   if (action.action === 'typeText') {
@@ -133,7 +145,11 @@ export function summarizeDemonstration(recording, bounds, maxTrajectoryPoints = 
       type: event.type,
       atMs: Math.max(0, Math.round(Number(event.atMs) || 0)),
       point: normalizePointToWindow({ x: event.x, y: event.y }, bounds),
-      ...(event.type === 'drag' ? { to: normalizePointToWindow({ x: event.toX, y: event.toY }, bounds) } : {})
+      ...(event.type === 'drag' ? {
+        to: normalizePointToWindow({ x: event.toX, y: event.toY }, bounds),
+        modifiers: normalizeInputModifiers(event.modifiers),
+        trajectoryMode: classifyTrajectoryMode(event)
+      } : {})
     }));
   const keyboard = (recording?.events ?? [])
     .filter((event) => ['pressKey', 'keyPreview'].includes(event.type) && !event.sensitive && event.key)
@@ -181,6 +197,9 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       step.to = normalizePointToWindow({ x: event.toX, y: event.toY }, window.bounds);
       step.durationMs = Math.min(Math.max(Math.round(Number(event.durationMs) || 350), 50), 5_000);
       step.button = event.button === 'right' ? 'right' : 'left';
+      const modifiers = normalizeInputModifiers(event.modifiers, { label: 'recording event modifiers' });
+      if (modifiers.length > 0) step.modifiers = modifiers;
+      step.trajectoryMode = classifyTrajectoryMode(event, target);
     }
     if (event.type === 'typeText') {
       if (typeof event.text !== 'string') {

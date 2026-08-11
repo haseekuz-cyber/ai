@@ -48,9 +48,12 @@ import { appendAuditEvent, readAuditEvents } from './audit-log.mjs';
 import { startSafetyHotkey } from './safety-hotkey.mjs';
 import { evaluateActionPolicy, evaluateLearnedStepPolicy } from './action-policy.mjs';
 import { executeGroundedAction, groundPlannerProposal } from './agent-grounding.mjs';
-import { sameWindowContext } from './window-context.mjs';
+import { sameWindowIdentity } from './window-context.mjs';
 import { normalizeSkillRecommendation, publicSkillCandidate, SKILL_ROUTER_SYSTEM_PROMPT } from './skill-router.mjs';
 import { waitForSettledObservation } from './observation-settling.mjs';
+import { applySettlingEvidence } from './action-validation.mjs';
+import { normalizeInputModifiers } from './input-modifiers.mjs';
+import { assessPlanWindow } from './plan-freshness.mjs';
 import { cropImageRegion } from './image-region.mjs';
 import {
   appendStepFeedback,
@@ -328,6 +331,8 @@ function publicTeachingEvent(event, bounds) {
   }
   if (event.type === 'drag') {
     item.to = normalizePointToWindow({ x: event.toX, y: event.toY }, bounds);
+    item.modifiers = normalizeInputModifiers(event.modifiers, { label: 'teaching event modifiers' });
+    item.trajectoryMode = event.trajectoryMode || 'adaptive';
   }
   if (event.type === 'pressKey' || event.type === 'keyPreview') item.key = String(event.key || '').slice(0, 40);
   if (event.type === 'click' || event.type === 'doubleClick' || event.type === 'drag') item.button = event.button === 'right' ? 'right' : 'left';
@@ -355,10 +360,6 @@ function publicLearnedStepForProcess(step, processName) {
     ...publicLearnedStep(step),
     policy: evaluateLearnedStepPolicy({ step, processName })
   };
-}
-
-function sameBounds(left, right) {
-  return ['x', 'y', 'width', 'height'].every((key) => Number(left?.[key]) === Number(right?.[key]));
 }
 
 async function refreshDiagnostics() {
@@ -505,8 +506,8 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     boundedUiRequest({ operation: 'inspect', windowHandle, maxDepth: 8, maxElements: 1_000 }),
     { timeoutMs: 30_000 }
   );
-  if (mission && !sameWindowContext(inspected.window, mission.window)) {
-    const error = new Error('The target window or active document changed. Start a new mission for the current document.');
+  if (mission && !sameWindowIdentity(inspected.window, mission.window)) {
+    const error = new Error('The target window process, handle, or active document changed. Start a new mission for the current document.');
     error.code = 'stale_mission';
     throw error;
   }
@@ -1278,10 +1279,11 @@ const server = http.createServer(async (request, response) => {
         boundedUiRequest({ operation: 'inspect', windowHandle: plan.window.nativeWindowHandle, maxDepth: 0, maxElements: 1 }),
         { timeoutMs: 30_000 }
       );
-      if (!sameWindowContext(inspected.window, plan.window) || !sameBounds(inspected.window.bounds, plan.window.bounds)) {
+      const freshness = assessPlanWindow({ plans: actionPlans, plan, currentWindow: inspected.window });
+      if (freshness.status !== 'fresh') {
         return sendJson(response, 409, {
-          error: 'stale_plan',
-          message: 'The target window, active document, position, size, or process changed after planning. Create a new plan.'
+          error: freshness.error,
+          message: freshness.message
         });
       }
 
@@ -1388,6 +1390,7 @@ const server = http.createServer(async (request, response) => {
           };
         }
       }
+      validation = applySettlingEvidence(validation, settling, { actionType: plan.proposal.action.type });
 
       plan.status = 'executed';
       plan.executedAt = new Date().toISOString();
@@ -1938,6 +1941,7 @@ const server = http.createServer(async (request, response) => {
       } catch (error) {
         validation = { success: false, evidence: '', confidence: 0, nextStep: '', limitations: [error.message] };
       }
+      validation = applySettlingEvidence(validation, settling, { actionType: step.type });
 
       const executedStepIndex = run.stepIndex;
       run.stepIndex += 1;

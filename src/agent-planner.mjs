@@ -1,3 +1,5 @@
+import { normalizeInputModifiers } from './input-modifiers.mjs';
+
 const supportedActions = new Set(['click', 'doubleClick', 'scroll', 'drag', 'typeText', 'wait', 'done']);
 const riskLevels = new Set(['read_only', 'local_change', 'external_effect', 'dangerous']);
 
@@ -11,6 +13,7 @@ Do not claim that the action has already happened. Return JSON only, without mar
     "point":{"x":0.0,"y":0.0},
     "from":{"x":0.0,"y":0.0},
     "to":{"x":0.0,"y":0.0},
+    "modifiers":["Control"],
     "delta":-120,
     "durationMs":350,
     "text":"text to enter",
@@ -29,6 +32,7 @@ Treat the fresh screenshot as the source of truth. A previous successful step ma
 Prefer a semantic target from the structured interface map when one exists. Use visual coordinates only for custom canvases or targets absent from that map. Never assume that two applications expose the same controls.
 When a drawing or shape tool is active and the task requires creating or resizing something on a canvas, use drag with visible start and end points. Do not use click on an empty canvas as a substitute for a drawing gesture.
 For drag, from and to must be visibly different points. When creating a shape, first create a visible non-zero shape; exact dimensions can be set in a later step through visible size fields.
+For drag, include modifiers only when the user explicitly requires Control, Shift, or Alt for that gesture. Never invent a modifier.
 When a selected object exposes numeric size fields in a visible property bar, type directly into the width or height field. Do not invent a generic properties button or dialog. If the field already shows a unit, enter only the numeric value.
 Use click only for a discrete visible control, object, or position that can be verified locally.
 Opening a chat, sending a message, publishing, purchasing, deleting, overwriting files, changing account/security settings, or confirming a dialog is external_effect or dangerous.
@@ -128,6 +132,8 @@ export function normalizePlannerOutput(value, screenshotBounds = null) {
       throw new TypeError('action.from and action.to must describe a visible non-zero drag.');
     }
     action.durationMs = Math.min(Math.max(Math.round(finite(rawAction.durationMs ?? 350, 'action.durationMs')), 50), 5_000);
+    const modifiers = normalizeInputModifiers(rawAction.modifiers, { label: 'action.modifiers' });
+    if (modifiers.length > 0) action.modifiers = modifiers;
   }
   if (type === 'scroll') action.delta = Math.min(Math.max(Math.round(finite(rawAction.delta ?? -120, 'action.delta')), -1_200), 1_200);
   if (type === 'typeText') {
@@ -182,7 +188,13 @@ export function toScreenPointerAction(action, bounds, windowHandle) {
     y: Math.round(finite(bounds.y, 'bounds.y') + point.y * Math.max(0, height - 1))
   });
   const common = { windowHandle, action: action.type, confirmed: true };
-  if (action.type === 'drag') return { ...common, from: convert(action.from), to: convert(action.to), durationMs: action.durationMs };
+  if (action.type === 'drag') return {
+    ...common,
+    from: convert(action.from),
+    to: convert(action.to),
+    durationMs: action.durationMs,
+    ...(action.modifiers?.length ? { modifiers: normalizeInputModifiers(action.modifiers, { label: 'action.modifiers' }) } : {})
+  };
   if (action.type === 'scroll') return { ...common, point: convert(action.point), delta: action.delta };
   if (action.type === 'typeText') return { ...common, point: convert(action.point), text: action.text };
   if (action.type === 'click' || action.type === 'doubleClick') return { ...common, point: convert(action.point), button: 'left' };

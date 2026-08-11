@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { normalizeInputModifiers } from './input-modifiers.mjs';
 
 const execFileAsync = promisify(execFile);
 const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -40,12 +41,14 @@ export function normalizePointerAction(input) {
     confirmed: true
   };
   if (input.action === 'drag') {
+    const modifiers = normalizeInputModifiers(input.modifiers);
     return {
       ...common,
       from: normalizePoint(input.from, 'from'),
       to: normalizePoint(input.to, 'to'),
       durationMs: Math.min(Math.max(finiteNumber(input.durationMs ?? 350, 'durationMs'), 50), 5_000),
-      button: input.button === 'right' ? 'right' : 'left'
+      button: input.button === 'right' ? 'right' : 'left',
+      ...(modifiers.length > 0 ? { modifiers } : {})
     };
   }
 
@@ -76,11 +79,12 @@ export function createBoundedPointerRequest({ action, allowedBounds, forbiddenPr
       !Number.isFinite(allowedBounds.width) || !Number.isFinite(allowedBounds.height)) {
     throw new TypeError('allowedBounds are required.');
   }
-  return {
+  const normalized = {
     ...normalizePointerAction(action),
     allowedBounds,
     forbiddenProcessNames: [...forbiddenProcessNames]
   };
+  return normalized;
 }
 
 export async function runPointerAction(scriptPath, request, options = {}) {

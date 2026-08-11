@@ -291,6 +291,33 @@ async function executeStep() {
     taskButton.textContent = 'Следующий шаг';
     setStatus('Оцените результат шага: 👍 правильно, 👎 неправильно. После оценки модель сама подготовит следующий шаг.');
   } catch (error) {
+    // Handle needs_replan: automatically request a new plan for the same mission/window
+    if (error.body?.error === 'needs_replan') {
+      currentPlan = null; // Invalidate old plan
+      resetStepView();
+      setStatus('Окно изменило размер или позицию. Запрашиваю новый план для того же окна…');
+      // One request produces one fresh proposal; execution still requires confirmation.
+      try {
+        const replanBody = await api('/api/missions/plan-next', {
+          method: 'POST',
+          body: JSON.stringify({ missionId: currentMission?.missionId })
+        });
+        currentMission = replanBody.mission;
+        if (replanBody.proposal?.action?.type === 'done' || replanBody.mission?.status === 'complete') {
+          currentMission = null;
+          taskButton.textContent = 'Начать новую задачу';
+          setStatus('Задача завершена. Проверьте итог в программе.');
+        } else if (replanBody.policy?.allowExecution === false) {
+          setStatus(`Шаг остановлен безопасностью: ${replanBody.policy.reason}`, { error: true });
+        } else {
+          showPlan(replanBody);
+          setStatus('Новый план готов. Окно обновлено, подтвердите выполнение нового шага.');
+        }
+      } catch (replanError) {
+        setStatus(`Не удалось создать новый план: ${replanError.message}`, { error: true });
+      }
+      return; // Do not mark as executed - user must confirm new plan
+    }
     resetStepView();
     setStatus(`Шаг не выполнен: ${error.message}`, { error: true });
   } finally {
