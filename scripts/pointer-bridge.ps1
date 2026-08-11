@@ -252,17 +252,53 @@ try {
             $downMessage = if ($isRight) { 0x0204 } else { 0x0201 }
             $upMessage = if ($isRight) { 0x0205 } else { 0x0202 }
             $buttonState = if ($isRight) { 2 } else { 1 }
-            [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::Zero, (Pack-Point $from))
-            [void][AiPointerBridgeNative]::PostMessage($inputHandle, $downMessage, [UIntPtr]::new($buttonState), (Pack-Point $from))
-            for ($step = 1; $step -le $steps; $step++) {
-                $point = [AiPointerBridgeNative+POINT]::new()
-                $point.X = [int][math]::Round($from.X + (($to.X - $from.X) * $step / $steps))
-                $point.Y = [int][math]::Round($from.Y + (($to.Y - $from.Y) * $step / $steps))
-                [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::new($buttonState), (Pack-Point $point))
-                Start-Sleep -Milliseconds ([math]::Max(1, [math]::Floor([int]$request.durationMs / $steps)))
+            
+            # Validate and send modifiers (Control/Shift/Alt only)
+            $modifierKeys = @()
+            if ($null -ne $request.modifiers -and $request.modifiers.Count -gt 0) {
+                foreach ($mod in $request.modifiers) {
+                    if ($mod -notin @('Control', 'Shift', 'Alt')) {
+                        throw "Unknown modifier '$mod'. Only Control/Shift/Alt are allowed."
+                    }
+                    switch ($mod) {
+                        'Control' { $modifierKeys += 0x11 }  # VK_CONTROL
+                        'Shift'   { $modifierKeys += 0x10 }  # VK_SHIFT
+                        'Alt'     { $modifierKeys += 0x12 }  # VK_MENU
+                    }
+                }
             }
-            [void][AiPointerBridgeNative]::PostMessage($inputHandle, $upMessage, [UIntPtr]::Zero, (Pack-Point $to))
-            $transport = [ordered]@{ transport = 'window-message'; pattern = 'drag'; element = $null }
+            
+            try {
+                # Send modifier key-down messages before drag
+                foreach ($vk in $modifierKeys) {
+                    [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0100, [UIntPtr]::new($vk), [IntPtr]::Zero)
+                }
+                
+                # Mouse move to start position
+                [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::Zero, (Pack-Point $from))
+                # Mouse down
+                [void][AiPointerBridgeNative]::PostMessage($inputHandle, $downMessage, [UIntPtr]::new($buttonState), (Pack-Point $from))
+                
+                # Drag trajectory
+                for ($step = 1; $step -le $steps; $step++) {
+                    $point = [AiPointerBridgeNative+POINT]::new()
+                    $point.X = [int][math]::Round($from.X + (($to.X - $from.X) * $step / $steps))
+                    $point.Y = [int][math]::Round($from.Y + (($to.Y - $from.Y) * $step / $steps))
+                    [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::new($buttonState), (Pack-Point $point))
+                    Start-Sleep -Milliseconds ([math]::Max(1, [math]::Floor([int]$request.durationMs / $steps)))
+                }
+                
+                # Mouse up
+                [void][AiPointerBridgeNative]::PostMessage($inputHandle, $upMessage, [UIntPtr]::Zero, (Pack-Point $to))
+                
+                $transport = [ordered]@{ transport = 'window-message'; pattern = 'drag'; element = $null }
+            }
+            finally {
+                # Always release modifiers in reverse order
+                for ($i = $modifierKeys.Count - 1; $i -ge 0; $i--) {
+                    [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0101, [UIntPtr]::new($modifierKeys[$i]), [IntPtr]::Zero)
+                }
+            }
         }
         'typeText' {
             $transport = Set-AccessibleValue $processId $request.point ([string]$request.text)

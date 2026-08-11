@@ -56,6 +56,7 @@ public static class AIWorkstationTeachRecorder
         public string controlType;
         public bool sensitive;
         public string source;
+        public string[] modifiers;
     }
     public sealed class RecorderOutput
     {
@@ -67,7 +68,7 @@ public static class AIWorkstationTeachRecorder
         public List<string> warnings;
     }
 
-    private sealed class PendingPointer { public POINT Point; public long AtMs; public string Button; }
+    private sealed class PendingPointer { public POINT Point; public long AtMs; public string Button; public string[] Modifiers; }
     private sealed class RecordingContext : ApplicationContext
     {
         public readonly System.Windows.Forms.Timer Timer;
@@ -254,8 +255,8 @@ public static class AIWorkstationTeachRecorder
             MSLLHOOKSTRUCT data = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
             int message = wParam.ToInt32();
             if (message == WM_MOUSEMOVE && PointBelongsToTarget(data.pt)) RecordPointerMove(data.pt);
-            else if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt)) leftDown = NewPending(data.pt, "left");
-            else if (message == WM_RBUTTONDOWN && PointBelongsToTarget(data.pt)) rightDown = NewPending(data.pt, "right");
+            else if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt)) leftDown = NewPending(data.pt, "left", GetActiveModifiers());
+            else if (message == WM_RBUTTONDOWN && PointBelongsToTarget(data.pt)) rightDown = NewPending(data.pt, "right", GetActiveModifiers());
             else if (message == WM_LBUTTONUP) CompletePointer(leftDown, data.pt);
             else if (message == WM_RBUTTONUP) CompletePointer(rightDown, data.pt);
             else if (message == WM_MOUSEWHEEL && PointBelongsToTarget(data.pt))
@@ -267,6 +268,16 @@ public static class AIWorkstationTeachRecorder
             if (message == WM_RBUTTONUP) rightDown = null;
         }
         return CallNextHookEx(mouseHook, nCode, wParam, lParam);
+    }
+
+    private static string[] GetActiveModifiers()
+    {
+        Keys modifiers = Control.ModifierKeys;
+        var list = new System.Collections.Generic.List<string>();
+        if ((modifiers & Keys.Control) == Keys.Control) list.Add("Control");
+        if ((modifiers & Keys.Shift) == Keys.Shift) list.Add("Shift");
+        if ((modifiers & Keys.Alt) == Keys.Alt) list.Add("Alt");
+        return list.ToArray();
     }
 
     private static IntPtr KeyboardHook(int nCode, IntPtr wParam, IntPtr lParam)
@@ -370,9 +381,9 @@ public static class AIWorkstationTeachRecorder
         AddEvent(new RecordedEvent { type = "pointerMove", atMs = now, x = point.X, y = point.Y, source = "pointer-hook" });
     }
 
-    private static PendingPointer NewPending(POINT point, string button)
+    private static PendingPointer NewPending(POINT point, string button, string[] modifiers)
     {
-        return new PendingPointer { Point = point, AtMs = Clock.ElapsedMilliseconds, Button = button };
+        return new PendingPointer { Point = point, AtMs = Clock.ElapsedMilliseconds, Button = button, Modifiers = modifiers };
     }
 
     private static void CompletePointer(PendingPointer pending, POINT end)
@@ -390,8 +401,9 @@ public static class AIWorkstationTeachRecorder
             toX = end.X,
             toY = end.Y,
             durationMs = duration,
-            button = pending.Button
-            ,source = "pointer-hook"
+            button = pending.Button,
+            modifiers = drag && pending.Modifiers != null && pending.Modifiers.Length > 0 ? pending.Modifiers : null,
+            source = "pointer-hook"
         });
     }
 

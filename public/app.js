@@ -38,6 +38,7 @@ let teachingSession = null;
 let teachingTimer = null;
 let paused = false;
 let busy = false;
+let replanAttempts = 0; // Track automatic replans per confirmation to avoid infinite loops
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -78,6 +79,7 @@ function actionLabel(action = {}) {
 
 function resetStepView() {
   currentPlan = null;
+  replanAttempts = 0; // Reset replan counter when step view is reset (new confirmation cycle)
   stepCard.hidden = true;
   executeButton.disabled = false;
 }
@@ -291,6 +293,43 @@ async function executeStep() {
     taskButton.textContent = 'Следующий шаг';
     setStatus('Оцените результат шага: 👍 правильно, 👎 неправильно. После оценки модель сама подготовит следующий шаг.');
   } catch (error) {
+    // Handle needs_replan: automatically request a new plan for the same mission/window
+    if (error.body?.error === 'needs_replan') {
+      currentPlan = null; // Invalidate old plan
+      resetStepView();
+      // Limit automatic replans to once per confirmation to avoid infinite loops
+      if (replanAttempts >= 1) {
+        setStatus('Окно изменилось повторно. Подтвердите задачу заново.', { error: true });
+        replanAttempts = 0; // Reset for next user confirmation
+        return;
+      }
+      replanAttempts++;
+      setStatus('Окно изменило размер или позицию. Запрашиваю новый план для того же окна…');
+      // Automatically replan once (limited to avoid infinite loops)
+      try {
+        const replanBody = await api('/api/missions/plan-next', {
+          method: 'POST',
+          body: JSON.stringify({ missionId: currentMission?.missionId })
+        });
+        currentMission = replanBody.mission;
+        if (replanBody.proposal?.action?.type === 'done' || replanBody.mission?.status === 'complete') {
+          currentMission = null;
+          replanAttempts = 0;
+          taskButton.textContent = 'Начать новую задачу';
+          setStatus('Задача завершена. Проверьте итог в программе.');
+        } else if (replanBody.policy?.allowExecution === false) {
+          replanAttempts = 0;
+          setStatus(`Шаг остановлен безопасностью: ${replanBody.policy.reason}`, { error: true });
+        } else {
+          showPlan(replanBody);
+          setStatus('Новый план готов. Окно обновлено, подтвердите выполнение нового шага.');
+        }
+      } catch (replanError) {
+        replanAttempts = 0;
+        setStatus(`Не удалось создать новый план: ${replanError.message}`, { error: true });
+      }
+      return; // Do not mark as executed - user must confirm new plan
+    }
     resetStepView();
     setStatus(`Шаг не выполнен: ${error.message}`, { error: true });
   } finally {
