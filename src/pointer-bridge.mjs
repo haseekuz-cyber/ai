@@ -45,7 +45,8 @@ export function normalizePointerAction(input) {
       from: normalizePoint(input.from, 'from'),
       to: normalizePoint(input.to, 'to'),
       durationMs: Math.min(Math.max(finiteNumber(input.durationMs ?? 350, 'durationMs'), 50), 5_000),
-      button: input.button === 'right' ? 'right' : 'left'
+      button: input.button === 'right' ? 'right' : 'left',
+      modifiers: input.modifiers
     };
   }
 
@@ -71,16 +72,40 @@ export function normalizePointerAction(input) {
   return normalized;
 }
 
+const ALLOWED_MODIFIERS = new Set(['Control', 'Shift', 'Alt']);
+
+export function normalizeModifiers(input) {
+  if (!Array.isArray(input)) return [];
+  const normalized = input
+    .filter((m) => typeof m === 'string' && ALLOWED_MODIFIERS.has(m))
+    .sort();
+  return [...new Set(normalized)];
+}
+
+export function validateModifiersStrict(input) {
+  if (!Array.isArray(input) || input.length === 0) return [];
+  for (const m of input) {
+    if (typeof m !== 'string' || !ALLOWED_MODIFIERS.has(m)) {
+      throw new TypeError(`Unknown modifier '${m}'. Only Control/Shift/Alt are allowed.`);
+    }
+  }
+  return [...new Set(input)].sort();
+}
+
 export function createBoundedPointerRequest({ action, allowedBounds, forbiddenProcessNames }) {
   if (!allowedBounds || !Number.isFinite(allowedBounds.x) || !Number.isFinite(allowedBounds.y) ||
       !Number.isFinite(allowedBounds.width) || !Number.isFinite(allowedBounds.height)) {
     throw new TypeError('allowedBounds are required.');
   }
-  return {
+  const normalized = {
     ...normalizePointerAction(action),
     allowedBounds,
     forbiddenProcessNames: [...forbiddenProcessNames]
   };
+  if (action.action === 'drag' && Array.isArray(action.modifiers) && action.modifiers.length > 0) {
+    normalized.modifiers = validateModifiersStrict(action.modifiers);
+  }
+  return normalized;
 }
 
 export async function runPointerAction(scriptPath, request, options = {}) {

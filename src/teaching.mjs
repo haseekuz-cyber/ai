@@ -26,6 +26,34 @@ export function normalizePointToWindow(point, bounds) {
   };
 }
 
+const ALLOWED_MODIFIERS = new Set(['Control', 'Shift', 'Alt']);
+
+export function normalizeModifiers(input) {
+  if (!Array.isArray(input)) return [];
+  const normalized = input
+    .filter((m) => typeof m === 'string' && ALLOWED_MODIFIERS.has(m))
+    .sort();
+  return [...new Set(normalized)];
+}
+
+export function validateModifiersStrict(input) {
+  if (!Array.isArray(input) || input.length === 0) return [];
+  for (const m of input) {
+    if (typeof m !== 'string' || !ALLOWED_MODIFIERS.has(m)) {
+      throw new TypeError(`Unknown modifier '${m}'. Only Control/Shift/Alt are allowed.`);
+    }
+  }
+  return [...new Set(input)].sort();
+}
+
+export function classifyTrajectoryMode(recording, context = {}) {
+  const dragEvents = (recording?.events ?? []).filter((e) => e.type === 'drag');
+  if (dragEvents.length === 0) return 'optional';
+  const hasCanvasTarget = context.targetType === 'Canvas' || context.controlType === 'Pane';
+  if (hasCanvasTarget) return 'adaptive';
+  return 'optional';
+}
+
 function contains(bounds, x, y) {
   return bounds && !bounds.empty && bounds.width > 0 && bounds.height > 0 &&
     x >= bounds.x && y >= bounds.y && x < bounds.x + bounds.width && y < bounds.y + bounds.height;
@@ -181,6 +209,9 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       step.to = normalizePointToWindow({ x: event.toX, y: event.toY }, window.bounds);
       step.durationMs = Math.min(Math.max(Math.round(Number(event.durationMs) || 350), 50), 5_000);
       step.button = event.button === 'right' ? 'right' : 'left';
+      if (event.modifiers && Array.isArray(event.modifiers) && event.modifiers.length > 0) {
+        step.modifiers = normalizeModifiers(event.modifiers);
+      }
     }
     if (event.type === 'typeText') {
       if (typeof event.text !== 'string') {

@@ -48,7 +48,7 @@ import { appendAuditEvent, readAuditEvents } from './audit-log.mjs';
 import { startSafetyHotkey } from './safety-hotkey.mjs';
 import { evaluateActionPolicy, evaluateLearnedStepPolicy } from './action-policy.mjs';
 import { executeGroundedAction, groundPlannerProposal } from './agent-grounding.mjs';
-import { sameWindowContext } from './window-context.mjs';
+import { sameWindowIdentity, sameWindowGeometry } from './window-context.mjs';
 import { normalizeSkillRecommendation, publicSkillCandidate, SKILL_ROUTER_SYSTEM_PROMPT } from './skill-router.mjs';
 import { waitForSettledObservation } from './observation-settling.mjs';
 import { cropImageRegion } from './image-region.mjs';
@@ -357,10 +357,6 @@ function publicLearnedStepForProcess(step, processName) {
   };
 }
 
-function sameBounds(left, right) {
-  return ['x', 'y', 'width', 'height'].every((key) => Number(left?.[key]) === Number(right?.[key]));
-}
-
 async function refreshDiagnostics() {
   try {
     diagnostics = await collectWindowsDiagnostics(config.diagnosticsScript);
@@ -505,8 +501,8 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     boundedUiRequest({ operation: 'inspect', windowHandle, maxDepth: 8, maxElements: 1_000 }),
     { timeoutMs: 30_000 }
   );
-  if (mission && !sameWindowContext(inspected.window, mission.window)) {
-    const error = new Error('The target window or active document changed. Start a new mission for the current document.');
+  if (mission && !sameWindowIdentity(inspected.window, mission.window)) {
+    const error = new Error('The target window process, handle, or active document changed. Start a new mission for the current document.');
     error.code = 'stale_mission';
     throw error;
   }
@@ -1278,10 +1274,21 @@ const server = http.createServer(async (request, response) => {
         boundedUiRequest({ operation: 'inspect', windowHandle: plan.window.nativeWindowHandle, maxDepth: 0, maxElements: 1 }),
         { timeoutMs: 30_000 }
       );
-      if (!sameWindowContext(inspected.window, plan.window) || !sameBounds(inspected.window.bounds, plan.window.bounds)) {
+      // Identity check (process/handle/document) is fail-closed; geometry change triggers replan
+      if (!sameWindowIdentity(inspected.window, plan.window)) {
         return sendJson(response, 409, {
           error: 'stale_plan',
-          message: 'The target window, active document, position, size, or process changed after planning. Create a new plan.'
+          message: 'The target window, active document, or process changed after planning. Create a new plan.'
+        });
+      }
+      if (!sameWindowGeometry(inspected.window, plan.window)) {
+        // Geometry changed but identity is the same: invalidate plan and signal needs_replan
+        // so caller can refresh screenshot and recalculate. Old plan cannot be re-executed.
+        actionPlans.delete(plan.planId);
+        return sendJson(response, 409, {
+          error: 'needs_replan',
+          message: 'Window position or size changed. Refresh screenshot and create a new plan for the same window.',
+          window: inspected.window
         });
       }
 
