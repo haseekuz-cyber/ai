@@ -1,26 +1,30 @@
 import fs from 'node:fs/promises';
 import { adaptGuiModelAnalysis } from './gui-model-adapter.mjs';
+import { AGENT_DECISION_SCHEMA, UNIFIED_AGENT_SYSTEM_PROMPT } from './agent-model-protocol.mjs';
 
 const activeRequestControllers = new Set();
+let lmStudioRequestBroker = null;
 const truncationRetryFloor = 1_600;
 const truncationRetryCeiling = Math.max(
   truncationRetryFloor,
   Math.min(Number(process.env.AI_WORKSTATION_LM_MAX_OUTPUT_TOKENS) || 4_096, 8_192)
 );
 
-function trackedRequestSignal(timeoutMs) {
+function trackedRequestSignal(timeoutMs, externalSignal = null) {
   const controller = new AbortController();
   activeRequestControllers.add(controller);
+  const signals = [controller.signal, AbortSignal.timeout(timeoutMs)];
+  if (externalSignal) signals.push(externalSignal);
   return {
-    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
+    signal: AbortSignal.any(signals),
     dispose() {
       activeRequestControllers.delete(controller);
     }
   };
 }
 
-async function requestLmStudioJson(url, options, timeoutMs) {
-  const tracked = trackedRequestSignal(timeoutMs);
+async function requestLmStudioJson(url, options, timeoutMs, signal = null) {
+  const tracked = trackedRequestSignal(timeoutMs, signal);
   try {
     const response = await fetch(url, { ...options, signal: tracked.signal });
     const body = await response.json();
@@ -38,6 +42,11 @@ export function abortActiveLmStudioRequests(reason = 'AI execution was stopped b
 
 export function activeLmStudioRequestCount() {
   return activeRequestControllers.size;
+}
+
+export function configureLmStudioRequestBroker(broker = null) {
+  if (broker != null && typeof broker.runModel !== 'function') throw new TypeError('LM Studio request broker must expose runModel().');
+  lmStudioRequestBroker = broker;
 }
 
 export const DEFAULT_SYSTEM_PROMPT = `You are the read-only visual perception module of a Windows assistant.
@@ -140,13 +149,13 @@ async function readPngDataUrl(imagePath, maxImageBytes) {
   return `data:image/png;base64,${image.toString('base64')}`;
 }
 
-export function buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens = 800 }) {
+export function buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens = 800, maxPromptLength = 20_000 }) {
   if (typeof model !== 'string' || !model.trim()) throw new TypeError('LM Studio model is required.');
   if (typeof systemPrompt !== 'string' || !systemPrompt.trim()) throw new TypeError('systemPrompt is required.');
   return {
     model: model.trim(),
     system_prompt: systemPrompt.trim(),
-    input: [{ type: 'text', content: normalizeTextPrompt(prompt) }],
+    input: [{ type: 'text', content: normalizeTextPrompt(prompt, maxPromptLength) }],
     temperature: 0,
     max_output_tokens: maxOutputTokens,
     context_length: 8192,
@@ -247,6 +256,9 @@ function responseFormat(name, schema) {
 }
 
 function responseFormatForSystemPrompt(systemPrompt) {
+  if (systemPrompt === UNIFIED_AGENT_SYSTEM_PROMPT) {
+    return responseFormat('jarvis_agent_decision', AGENT_DECISION_SCHEMA);
+  }
   if (systemPrompt.includes('local interface planner')) {
     return responseFormat('next_ui_action', plannerSchema);
   }
@@ -498,26 +510,31 @@ function nextOutputTokenLimit(current) {
   return Math.min(truncationRetryCeiling, Math.max(truncationRetryFloor, Math.ceil(Number(current) * 2)));
 }
 
-async function requestStructuredCompletion({ baseUrl, requestBody, timeoutMs }) {
-  let maxOutputTokens = Math.max(1, Number(requestBody.max_output_tokens) || 1);
-  let truncationRetries = 0;
-  while (true) {
-    const attemptBody = { ...requestBody, max_output_tokens: maxOutputTokens };
-    const { response, body } = await requestLmStudioJson(`${baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(toStructuredChatCompletionRequest(attemptBody))
-    }, timeoutMs);
-    if (!response.ok) throw new Error(body?.error?.message || body?.error || `LM Studio HTTP ${response.status}`);
-    try {
-      const finishReason = assertCompletionFinished(body);
-      return { body, finishReason, maxOutputTokens, truncationRetries };
-    } catch (error) {
-      if (error.code !== 'lm_output_truncated' || maxOutputTokens >= truncationRetryCeiling) throw error;
-      maxOutputTokens = nextOutputTokenLimit(maxOutputTokens);
-      truncationRetries += 1;
+async function requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal = null }) {
+  const execute = async () => {
+    let maxOutputTokens = Math.max(1, Number(requestBody.max_output_tokens) || 1);
+    let truncationRetries = 0;
+    while (true) {
+      const attemptBody = { ...requestBody, max_output_tokens: maxOutputTokens };
+      const { response, body } = await requestLmStudioJson(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(toStructuredChatCompletionRequest(attemptBody))
+      }, timeoutMs, signal);
+      if (!response.ok) throw new Error(body?.error?.message || body?.error || `LM Studio HTTP ${response.status}`);
+      try {
+        const finishReason = assertCompletionFinished(body);
+        return { body, finishReason, maxOutputTokens, truncationRetries };
+      } catch (error) {
+        if (error.code !== 'lm_output_truncated' || maxOutputTokens >= truncationRetryCeiling) throw error;
+        maxOutputTokens = nextOutputTokenLimit(maxOutputTokens);
+        truncationRetries += 1;
+      }
     }
-  }
+  };
+  return lmStudioRequestBroker
+    ? lmStudioRequestBroker.runModel(requestBody.model, execute)
+    : execute();
 }
 
 export async function getLmStudioStatus({ baseUrl, timeoutMs = 5_000 }) {
@@ -613,11 +630,13 @@ export async function analyzeTextWithLmStudio({
   prompt,
   systemPrompt,
   maxOutputTokens = 800,
-  timeoutMs = 180_000
+  maxPromptLength = 20_000,
+  timeoutMs = 180_000,
+  signal = null
 }) {
-  const requestBody = buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens });
+  const requestBody = buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens, maxPromptLength });
   const { body, finishReason, maxOutputTokens: usedOutputTokenLimit, truncationRetries } =
-    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs });
+    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal });
   const raw = outputText(body);
   return {
     model: body.model_instance_id || body.model || model,
@@ -629,5 +648,39 @@ export async function analyzeTextWithLmStudio({
       truncationRetries
     },
     finishReason
+  };
+}
+
+export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOutputTokens = 1_600 } = {}) {
+  if (typeof baseUrl !== 'string' || !baseUrl.trim()) throw new TypeError('LM Studio baseUrl is required.');
+  return async function lmStudioAgentClient(context, {
+    model,
+    signal = null,
+    systemPrompt = UNIFIED_AGENT_SYSTEM_PROMPT,
+    responseSchema = AGENT_DECISION_SCHEMA,
+    repair = false,
+    formatError = null
+  } = {}) {
+    if (responseSchema !== AGENT_DECISION_SCHEMA) throw new TypeError('Unsupported agent decision schema.');
+    const prompt = JSON.stringify({
+      context,
+      ...(repair ? {
+        formatRepair: {
+          error: String(formatError || 'The prior response did not match the decision schema.'),
+          instruction: 'Return one corrected decision using the same context.'
+        }
+      } : {})
+    });
+    const result = await analyzeTextWithLmStudio({
+      baseUrl,
+      model,
+      prompt,
+      systemPrompt,
+      maxOutputTokens,
+      maxPromptLength: 100_000,
+      timeoutMs,
+      signal
+    });
+    return result.analysis;
   };
 }

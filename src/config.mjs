@@ -2,6 +2,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+const activeModel = process.env.AI_WORKSTATION_ACTIVE_MODEL ||
+  process.env.AI_WORKSTATION_LM_STUDIO_MODEL ||
+  'qwen/qwen3-vl-8b';
 
 function readPort(name, fallback) {
   const raw = process.env[name];
@@ -62,6 +65,9 @@ export const config = Object.freeze({
   teacherChatDirectory: process.env.AI_WORKSTATION_TEACHER_CHAT || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-chat'),
   teacherSandboxDirectory: process.env.AI_WORKSTATION_TEACHER_SANDBOX || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-sandbox'),
   teacherBackupDirectory: process.env.AI_WORKSTATION_TEACHER_BACKUPS || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-backups'),
+  errorPacketsDirectory: process.env.AI_WORKSTATION_ERROR_PACKETS || path.resolve(moduleDirectory, '..', 'artifacts', 'self-improvement', 'errors'),
+  improvementDirectory: process.env.AI_WORKSTATION_IMPROVEMENTS || path.resolve(moduleDirectory, '..', 'artifacts', 'self-improvement', 'candidates'),
+  evaluationDirectory: process.env.AI_WORKSTATION_EVALUATIONS || path.resolve(moduleDirectory, '..', 'artifacts', 'evaluations'),
   safetyStatePath: process.env.AI_WORKSTATION_SAFETY_STATE || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety.json'),
   safetyHotkeyReadyPath: process.env.AI_WORKSTATION_SAFETY_HOTKEY_READY || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety-hotkey.ready'),
   assignedDisplay: process.env.AI_WORKSTATION_DISPLAY || null,
@@ -69,8 +75,16 @@ export const config = Object.freeze({
   pointerOverlayEnabled: readBoolean('AI_WORKSTATION_POINTER_OVERLAY_ENABLED', true),
   pointerStatePath: process.env.AI_WORKSTATION_POINTER_STATE || path.resolve(moduleDirectory, '..', 'artifacts', 'virtual-pointer.json'),
   lmStudioBaseUrl: process.env.AI_WORKSTATION_LM_STUDIO_URL || 'http://127.0.0.1:1234',
-  lmStudioModel: process.env.AI_WORKSTATION_LM_STUDIO_MODEL || 'qwen/qwen3-vl-8b',
-  teacherModel: process.env.AI_WORKSTATION_TEACHER_MODEL || process.env.AI_WORKSTATION_LM_STUDIO_MODEL || 'qwen/qwen3-vl-8b',
+  activeModel,
+  lmStudioModel: activeModel,
+  visionModel: activeModel,
+  plannerModel: activeModel,
+  criticModel: activeModel,
+  coderModel: activeModel,
+  embeddingModel: process.env.AI_WORKSTATION_EMBEDDING_MODEL || 'qwen/qwen3-embedding-0.6b',
+  teacherModel: activeModel,
+  modelBrokerEnabled: readBoolean('AI_WORKSTATION_MODEL_BROKER', true),
+  modelIdleTtlMs: readInteger('AI_WORKSTATION_MODEL_IDLE_TTL_MS', 120_000, { minimum: 10_000, maximum: 3_600_000 }),
   teacherFastPathEnabled: readBoolean('AI_WORKSTATION_TEACHER_FAST_PATH', true),
   miniPlansEnabled: readBoolean('AI_WORKSTATION_MINI_PLANS', true),
   eventObserverEnabled: readBoolean('AI_WORKSTATION_EVENT_OBSERVER', true),
