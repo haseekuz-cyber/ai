@@ -84,6 +84,7 @@ let selectedWindowHandle = null;
 let currentAgentSessionId = null;
 let currentAgentSessionMode = null;
 let currentAgentSessionGoal = null;
+let currentAgentAwaitingUser = false;
 let currentMission = null;
 let currentPlan = null;
 let completedStep = null;
@@ -743,6 +744,7 @@ async function stopCurrentAgentSession(reason = 'user_stop') {
   currentAgentSessionId = null;
   currentAgentSessionMode = null;
   currentAgentSessionGoal = null;
+  currentAgentAwaitingUser = false;
   if (!sessionId) return;
   try {
     await api('/api/agent/sessions/stop', {
@@ -764,6 +766,7 @@ async function ensureAgentSession({ goal, mode, windowHandle = null }) {
   currentAgentSessionId = body.sessionId;
   currentAgentSessionMode = mode;
   currentAgentSessionGoal = goal;
+  currentAgentAwaitingUser = false;
   return currentAgentSessionId;
 }
 
@@ -780,20 +783,30 @@ function summarizeUnifiedTurn(turn) {
 }
 
 async function runUnifiedAgentTurn({ autonomous = false } = {}) {
-  const goal = autonomous ? ANARCHY_INSTRUCTION : taskInput.value.trim();
+  const inputText = taskInput.value.trim();
+  const goal = autonomous ? ANARCHY_INSTRUCTION : inputText;
   if (!selectedWindowHandle || !goal || busy) return;
   busy = true;
   setStatus(autonomous ? 'Автономный режим анализирует свежий экран…' : 'JARVIS принимает следующее решение…');
   updateControls();
   try {
-    const sessionOptions = autonomous
-      ? { goal, mode: 'autonomous', windowHandle: selectedWindowHandle }
-      : { goal, mode: 'guided', windowHandle: selectedWindowHandle };
-    const sessionId = await ensureAgentSession(sessionOptions);
-    const turn = await api('/api/agent/sessions/next', {
-      method: 'POST',
-      body: JSON.stringify({ sessionId })
-    });
+    let turn;
+    if (currentAgentAwaitingUser && currentAgentSessionId) {
+      turn = await api('/api/agent/sessions/message', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: currentAgentSessionId, message: inputText })
+      });
+      currentAgentAwaitingUser = false;
+    } else {
+      const sessionOptions = autonomous
+        ? { goal, mode: 'autonomous', windowHandle: selectedWindowHandle }
+        : { goal, mode: 'guided', windowHandle: selectedWindowHandle };
+      const sessionId = await ensureAgentSession(sessionOptions);
+      turn = await api('/api/agent/sessions/next', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId })
+      });
+    }
     const report = summarizeUnifiedTurn(turn);
     reportJarvis(turn.kind === 'tool_result' ? 'Действие' : 'Решение', report);
     setStatus(report, { error: turn.results?.[0]?.status === 'failed' || turn.state?.status === 'failed' });
@@ -801,10 +814,13 @@ async function runUnifiedAgentTurn({ autonomous = false } = {}) {
       currentAgentSessionId = null;
       currentAgentSessionMode = null;
       currentAgentSessionGoal = null;
+      currentAgentAwaitingUser = false;
       if (autonomous && anarchyMode) stopAnarchyLoop();
     } else if (turn.kind === 'user_question') {
       taskInput.value = '';
       taskInput.placeholder = turn.decision?.question || 'Ответьте JARVIS…';
+      taskButton.textContent = 'Ответить JARVIS';
+      currentAgentAwaitingUser = true;
       if (autonomous) anarchyAwaitingCorrection = true;
     } else if (autonomous && anarchyMode) {
       clearAnarchyTimer();
@@ -824,19 +840,28 @@ async function runUnifiedAgentTurn({ autonomous = false } = {}) {
 }
 
 async function sendUnifiedProgrammerMessage(message) {
-  const sessionId = await ensureAgentSession({ goal: message, mode: 'programmer' });
+  const sessionId = currentAgentAwaitingUser && currentAgentSessionMode === 'programmer'
+    ? currentAgentSessionId
+    : await ensureAgentSession({ goal: message, mode: 'programmer' });
   let turn;
   for (let index = 0; index < 10; index += 1) {
-    turn = await api('/api/agent/sessions/next', {
-      method: 'POST', body: JSON.stringify({ sessionId })
-    });
+    turn = currentAgentAwaitingUser
+      ? await api('/api/agent/sessions/message', {
+        method: 'POST', body: JSON.stringify({ sessionId, message })
+      })
+      : await api('/api/agent/sessions/next', {
+        method: 'POST', body: JSON.stringify({ sessionId })
+      });
+    currentAgentAwaitingUser = false;
     if (turn.kind !== 'tool_result') break;
   }
   appendTeacherMessage('assistant', summarizeUnifiedTurn(turn));
+  if (turn?.kind === 'user_question') currentAgentAwaitingUser = true;
   if (['final', 'terminal', 'cancelled'].includes(turn?.kind)) {
     currentAgentSessionId = null;
     currentAgentSessionMode = null;
     currentAgentSessionGoal = null;
+    currentAgentAwaitingUser = false;
   }
   return turn;
 }
@@ -1842,9 +1867,13 @@ taskInput.addEventListener('input', () => {
   if (anarchyMode) anarchyMode = false;
   anarchyResumeGoal = null;
   if (currentMission && taskInput.value.trim() !== currentMission.instruction) cancelMission();
-  if (currentAgentSessionId && taskInput.value.trim() !== currentAgentSessionGoal) stopCurrentAgentSession('goal_changed');
+  if (currentAgentSessionId && !currentAgentAwaitingUser && taskInput.value.trim() !== currentAgentSessionGoal) {
+    stopCurrentAgentSession('goal_changed');
+  }
   resetFeedbackView();
-  taskButton.textContent = currentMission ? 'Следующий шаг' : 'Подготовить первый шаг';
+  taskButton.textContent = currentAgentAwaitingUser
+    ? 'Ответить JARVIS'
+    : currentMission ? 'Следующий шаг' : 'Подготовить первый шаг';
   updateControls();
 });
 

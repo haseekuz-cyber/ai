@@ -47,7 +47,9 @@ test('frontend uses one AgentSession identity and canonical autonomous copy', as
     fs.readFile(new URL('../public/app.js', import.meta.url), 'utf8')
   ]);
   assert.match(app, /currentAgentSessionId/);
+  assert.match(app, /currentAgentAwaitingUser/);
   assert.match(app, /\/api\/agent\/sessions/);
+  assert.match(app, /\/api\/agent\/sessions\/message/);
   assert.match(app, /mode:\s*'autonomous'/);
   assert.match(html, />Автономный режим</);
   assert.doesNotMatch(html, />Анархичность</);
