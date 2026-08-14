@@ -17,7 +17,8 @@
           </div>
         </div>
         <div class="top-actions">
-          <button id="anarchy-button" class="quiet anarchy" type="button">Анархичность</button>
+          <button id="programmer-button" class="quiet programmer" type="button">Программист</button>
+          <button id="anarchy-button" class="quiet anarchy" type="button">Автономный режим</button>
           <button id="safety-toggle" class="quiet danger" type="button">Стоп</button>
           <button id="full-shutdown-button" class="quiet full-shutdown" type="button">Полное отключение</button>
         </div>
@@ -104,13 +105,15 @@
         <div class="teacher-chat-heading">
           <div>
             <strong>JARVIS — программист системы</strong>
-            <span>Опишите изменение или вставьте ссылку на YouTube, урок либо документацию. JARVIS сохранит материал отдельно от принципов.</span>
+            <span>Тестируйте Worker, сообщайте ошибку здесь — JARVIS изучит доказательства и интернет, подготовит патч и прогонит тесты.</span>
           </div>
+          <span class="programmer-badge">Интернет · отдельная копия · тесты · откат</span>
         </div>
         <div id="teacher-messages" class="teacher-messages"></div>
         <div class="teacher-chat-input">
           <textarea id="teacher-message" rows="2" maxlength="4000" placeholder="Опишите изменение или вставьте ссылку на YouTube, урок либо документацию для обучения JARVIS…"></textarea>
           <div class="teacher-chat-actions">
+            <button id="teacher-fix-last" class="secondary compact" type="button">Исправить последнюю ошибку</button>
             <label class="attachment-button" for="teacher-screenshot">📎 Скриншот</label>
             <input id="teacher-screenshot" type="file" accept="image/png,image/jpeg,image/webp" hidden />
             <span id="teacher-attachment" class="attachment-name">Файл не выбран</span>
@@ -129,6 +132,7 @@
           <ul id="teacher-proposal-files"></ul>
           <p id="teacher-proposal-tests"></p>
           <button id="teacher-apply" class="primary compact" type="button">Применить проверенное изменение</button>
+          <button id="teacher-rollback" class="secondary compact" type="button" hidden>Откатить изменение</button>
         </article>
       </section>
 

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
@@ -97,6 +100,35 @@ test('LM Studio adapter uses the unified strict schema for a full compiled conte
     assert.equal(request.model, 'test-model');
     assert.equal(request.response_format.json_schema.name, 'jarvis_agent_decision');
     assert.deepEqual(request.response_format.json_schema.schema, AGENT_DECISION_SCHEMA);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LM Studio adapter attaches the fresh observation returned by a UI tool', async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-observation-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const screenshotPath = path.join(directory, 'frame.png');
+  await fs.writeFile(screenshotPath, Buffer.from('89504e470d0a1a0a', 'hex'));
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (_url, options) => {
+    request = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { choices: [{ finish_reason: 'stop', message: { content: '{"type":"final","status":"completed","summary":"ok","evidence":[]}' } }] };
+      }
+    };
+  };
+  try {
+    const client = createLmStudioAgentClient({ baseUrl: 'http://127.0.0.1:1234' });
+    await client({ pinned: { lastToolResult: { tool: 'ui.observe', result: { screenshotPath } } } }, {
+      model: 'test-model', systemPrompt: UNIFIED_AGENT_SYSTEM_PROMPT, responseSchema: AGENT_DECISION_SCHEMA
+    });
+    const userContent = request.messages[1].content;
+    assert.equal(userContent.some((item) => item.type === 'image_url'), true);
   } finally {
     globalThis.fetch = originalFetch;
   }

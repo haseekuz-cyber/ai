@@ -63,14 +63,14 @@ Return JSON only, without markdown fences. Use this exact top-level shape:
 }
 Coordinates are normalized to the image from 0 to 1. Do not invent obscured text or off-screen state.`;
 
-export function normalizeVisionPrompt(value) {
+export function normalizeVisionPrompt(value, maxLength = 4_000) {
   if (value == null || value === '') {
     return 'Опиши видимое окно, выдели важный текст и элементы управления. Ничего не выполняй.';
   }
   if (typeof value !== 'string') throw new TypeError('prompt must be a string.');
   const prompt = value.trim();
   if (!prompt) throw new TypeError('prompt must not be empty.');
-  if (prompt.length > 4_000) throw new TypeError('prompt is too long.');
+  if (prompt.length > maxLength) throw new TypeError('prompt is too long.');
   return prompt;
 }
 
@@ -102,13 +102,14 @@ export function parseModelJson(content) {
   }
 }
 
-export function buildVisionRequest({ model, prompt, imageDataUrl, systemPrompt = DEFAULT_SYSTEM_PROMPT, maxOutputTokens = 1800 }) {
+export function buildVisionRequest({ model, prompt, imageDataUrl, systemPrompt = DEFAULT_SYSTEM_PROMPT, maxOutputTokens = 1800, maxPromptLength = 4_000 }) {
   return buildMultiImageVisionRequest({
     model,
     prompt,
     imageDataUrls: [imageDataUrl],
     systemPrompt,
-    maxOutputTokens
+    maxOutputTokens,
+    maxPromptLength
   });
 }
 
@@ -117,7 +118,8 @@ export function buildMultiImageVisionRequest({
   prompt,
   imageDataUrls,
   systemPrompt = DEFAULT_SYSTEM_PROMPT,
-  maxOutputTokens = 1800
+  maxOutputTokens = 1800,
+  maxPromptLength = 4_000
 }) {
   if (typeof model !== 'string' || !model.trim()) throw new TypeError('LM Studio model is required.');
   if (!Array.isArray(imageDataUrls) || imageDataUrls.length === 0 || imageDataUrls.length > 4) {
@@ -130,7 +132,7 @@ export function buildMultiImageVisionRequest({
     model: model.trim(),
     system_prompt: systemPrompt,
     input: [
-      { type: 'text', content: normalizeVisionPrompt(prompt) },
+      { type: 'text', content: normalizeVisionPrompt(prompt, maxPromptLength) },
       ...imageDataUrls.map((dataUrl) => ({ type: 'image', data_url: dataUrl }))
     ],
     temperature: 0,
@@ -510,7 +512,7 @@ function nextOutputTokenLimit(current) {
   return Math.min(truncationRetryCeiling, Math.max(truncationRetryFloor, Math.ceil(Number(current) * 2)));
 }
 
-async function requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal = null }) {
+async function requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal = null, useBroker = true }) {
   const execute = async () => {
     let maxOutputTokens = Math.max(1, Number(requestBody.max_output_tokens) || 1);
     let truncationRetries = 0;
@@ -532,7 +534,7 @@ async function requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, si
       }
     }
   };
-  return lmStudioRequestBroker
+  return useBroker && lmStudioRequestBroker
     ? lmStudioRequestBroker.runModel(requestBody.model, execute)
     : execute();
 }
@@ -559,8 +561,11 @@ export async function analyzeImageWithLmStudio({
   prompt,
   systemPrompt,
   maxOutputTokens,
+  maxPromptLength = 4_000,
   maxImageBytes = 20 * 1024 * 1024,
-  timeoutMs = 180_000
+  timeoutMs = 180_000,
+  signal = null,
+  useBroker = true
 }) {
   const imageDataUrl = await readPngDataUrl(imagePath, maxImageBytes);
   const requestBody = buildVisionRequest({
@@ -568,11 +573,12 @@ export async function analyzeImageWithLmStudio({
     prompt,
     imageDataUrl,
     systemPrompt,
-    maxOutputTokens
+    maxOutputTokens,
+    maxPromptLength
   });
 
   const { body, finishReason, maxOutputTokens: usedOutputTokenLimit, truncationRetries } =
-    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs });
+    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal, useBroker });
   const raw = outputText(body);
   return {
     model: body.model_instance_id || body.model || model,
@@ -632,11 +638,12 @@ export async function analyzeTextWithLmStudio({
   maxOutputTokens = 800,
   maxPromptLength = 20_000,
   timeoutMs = 180_000,
-  signal = null
+  signal = null,
+  useBroker = true
 }) {
   const requestBody = buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens, maxPromptLength });
   const { body, finishReason, maxOutputTokens: usedOutputTokenLimit, truncationRetries } =
-    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal });
+    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal, useBroker });
   const raw = outputText(body);
   return {
     model: body.model_instance_id || body.model || model,
@@ -671,16 +678,32 @@ export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOut
         }
       } : {})
     });
-    const result = await analyzeTextWithLmStudio({
-      baseUrl,
-      model,
-      prompt,
-      systemPrompt,
-      maxOutputTokens,
-      maxPromptLength: 100_000,
-      timeoutMs,
-      signal
-    });
+    const screenshotPath = context?.pinned?.lastToolResult?.result?.screenshotPath ||
+      context?.pinned?.lastObservation?.screenshotPath || null;
+    const result = screenshotPath
+      ? await analyzeImageWithLmStudio({
+        baseUrl,
+        model,
+        imagePath: screenshotPath,
+        prompt,
+        systemPrompt,
+        maxOutputTokens,
+        maxPromptLength: 100_000,
+        timeoutMs,
+        signal,
+        useBroker: false
+      })
+      : await analyzeTextWithLmStudio({
+        baseUrl,
+        model,
+        prompt,
+        systemPrompt,
+        maxOutputTokens,
+        maxPromptLength: 100_000,
+        timeoutMs,
+        signal,
+        useBroker: false
+      });
     return result.analysis;
   };
 }

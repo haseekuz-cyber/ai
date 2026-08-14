@@ -24,6 +24,7 @@ test('same session returns a tool result to the same active model context', asyn
   assert.equal(first.kind, 'tool_result');
   assert.equal(second.kind, 'final');
   assert.equal(seen[0].options.model, 'test-model');
+  assert.deepEqual(seen[0].context.availableTools.map((tool) => tool.name), ['test.read']);
   assert.equal(seen[1].options.model, 'test-model');
   assert.equal(seen[1].context.pinned.goal, 'Проверь');
   assert.equal(seen[1].context.pinned.lastToolResult.tool, 'test.read');
@@ -32,6 +33,7 @@ test('same session returns a tool result to the same active model context', asyn
   assert.equal(loaded.events.filter((event) => event.type === 'model.decided').length, 2);
   assert.match(loaded.events.find((event) => event.type === 'model.decided').payload.decisionId, /^[0-9a-f-]{36}$/);
   assert.match(loaded.events.find((event) => event.type === 'tool.requested').toolInvocationId, /^[0-9a-f-]{36}$/);
+  assert.equal((await engine.status(session.sessionId)).sessionId, session.sessionId);
 });
 
 test('invalid model format is repaired once by the same active model', async () => {

@@ -20,6 +20,7 @@ import {
   analyzeImagesWithLmStudio,
   analyzeTextWithLmStudio,
   configureLmStudioRequestBroker,
+  createLmStudioAgentClient,
   getLmStudioStatus,
   normalizeVisionPrompt
 } from './lmstudio-client.mjs';
@@ -176,9 +177,18 @@ import {
 import {
   applyCodeCandidate,
   createCodeCandidate,
+  registerCodeCandidateTools,
   rollbackCodeCandidate,
   runCandidateTests
 } from './code-candidate.mjs';
+import { AgentEngine } from './agent-engine.mjs';
+import { ContextCompiler } from './context-compiler.mjs';
+import { SessionStore } from './session-store.mjs';
+import { ToolInvocationLedger } from './tool-invocation-ledger.mjs';
+import { ToolRegistry } from './tool-registry.mjs';
+import { InputArbiter } from './input-arbiter.mjs';
+import { readWindowsUserActivity } from './windows-user-activity.mjs';
+import { registerRepositoryTools } from './repository-tools.mjs';
 
 let diagnostics;
 let diagnosticsError;
@@ -190,6 +200,9 @@ let teachingSession = null;
 const skillRuns = new Map();
 const missions = new Map();
 const teacherCodeProposals = new Map();
+const activeUnifiedSessions = new Set();
+let unifiedAgentEngine = null;
+let unifiedToolRegistry = null;
 const missionTtlMs = 30 * 60 * 1000;
 let executionPaused = false;
 let safetyReason = null;
@@ -1467,6 +1480,7 @@ async function discardMissionMiniPlan(mission, reason, details = {}) {
   mission.pendingMiniPlan = null;
   await audit('mini_plan.invalidated', {
     missionId: mission.missionId,
+    agentSessionId: mission.agentSessionId || null,
     miniPlanId: miniPlan.miniPlanId,
     completed: miniPlan.nextIndex,
     total: miniPlan.steps.length,
@@ -1474,6 +1488,127 @@ async function discardMissionMiniPlan(mission, reason, details = {}) {
     ...details
   });
   return true;
+}
+
+const unifiedModes = new Set(['guided', 'chat', 'programmer', 'autonomous']);
+
+function normalizeUnifiedMode(value) {
+  const mode = value === 'anarchy' ? 'autonomous' : (value || 'guided');
+  if (!unifiedModes.has(mode)) throw new TypeError(`Unsupported AgentSession mode: ${mode}.`);
+  return mode;
+}
+
+function unifiedPolicy() {
+  return {
+    async authorize({ manifest }) {
+      if (manifest.readOnly) return { allowed: true, reason: 'read_only' };
+      return config.unifiedAgentMutationsEnabled
+        ? { allowed: true, reason: 'benchmark_gate_enabled' }
+        : { allowed: false, reason: 'State-changing unified tools are locked until the replay benchmark passes.' };
+    }
+  };
+}
+
+function compactUnifiedInspection(inspected) {
+  return {
+    window: inspected.window,
+    activeSurface: inspected.activeSurface || null,
+    visibleText: Array.isArray(inspected.visibleText) ? inspected.visibleText.slice(0, 250) : [],
+    elements: Array.isArray(inspected.elements) ? inspected.elements.slice(0, 500) : []
+  };
+}
+
+async function captureUnifiedObservation(windowHandle, label = 'agent-observe') {
+  const inspected = await inspectPlanningSurface(windowHandle);
+  recordInterfaceInspection(inspected, 'unified_agent');
+  await ensureWindowEventObserver(windowHandle);
+  await fs.mkdir(config.observationsDirectory, { recursive: true });
+  const screenshotPath = path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-${label}.png`);
+  const observation = await captureAssignedDisplayFrame(screenshotPath);
+  return {
+    ...compactUnifiedInspection(inspected),
+    screenshotPath: observation.outputPath,
+    sha256: observation.sha256,
+    displayBounds: observation.bounds || resolveUiAutomationDisplay(diagnostics, config.assignedDisplay).bounds
+  };
+}
+
+function registerUnifiedRuntimeTools(registry) {
+  registry.register({
+    name: 'ui.observe',
+    description: 'Capture a fresh full AI-display screenshot and inspect the selected Windows application before deciding an action.',
+    risk: 'read_only', readOnly: true, idempotency: 'retryable',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  }, async (_args, context) => {
+    const windowHandle = Number(context.surface?.windowHandle);
+    if (!Number.isInteger(windowHandle) || windowHandle <= 0) throw new TypeError('This session has no selected UI window.');
+    return captureUnifiedObservation(windowHandle);
+  });
+
+  registry.register({
+    name: 'ui.uia',
+    description: 'Invoke or edit a visible UI Automation element in the selected application, then return a fresh observation.',
+    risk: 'reversible_local', readOnly: false, idempotency: 'at_most_once',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['invoke', 'setValue', 'toggle', 'select', 'expand', 'collapse'] },
+        selector: { type: 'object' },
+        value: { type: 'string' }
+      },
+      required: ['action', 'selector'], additionalProperties: false
+    }
+  }, async (args, context) => {
+    const windowHandle = Number(context.surface?.windowHandle);
+    if (!Number.isInteger(windowHandle) || windowHandle <= 0) throw new TypeError('This session has no selected UI window.');
+    const requestBody = validateActionRequest({ ...args, windowHandle, confirmed: true });
+    const result = await runUiAutomation(config.uiaScript, boundedUiRequest({ operation: 'action', ...requestBody }));
+    return { actionResult: result, ...(await captureUnifiedObservation(windowHandle, 'agent-after-uia')) };
+  });
+
+  registry.register({
+    name: 'web.search',
+    description: 'Search public web sources only when current local evidence is insufficient.',
+    risk: 'read_only', readOnly: true, idempotency: 'retryable',
+    inputSchema: {
+      type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' } },
+      required: ['query'], additionalProperties: false
+    }
+  }, async ({ query, limit = 3 }) => ({ sources: await researchPublicWeb(query, { limit: Math.min(5, Math.max(1, limit)) }) }));
+}
+
+async function startUnifiedAgentSession({ goal, mode = 'guided', windowHandle = null, pendingCriteria = [] } = {}) {
+  const normalizedGoal = typeof goal === 'string' ? goal.trim() : '';
+  if (!normalizedGoal) throw new TypeError('AgentSession goal is required.');
+  if (normalizedGoal.length > 20_000) throw new TypeError('AgentSession goal is too long.');
+  const normalizedMode = normalizeUnifiedMode(mode);
+  let surface = null;
+  if (windowHandle != null) {
+    const handle = Number(windowHandle);
+    if (!Number.isInteger(handle) || handle <= 0) throw new TypeError('windowHandle must be a positive integer.');
+    const inspected = await runUiAutomation(
+      config.uiaScript,
+      boundedUiRequest({ operation: 'inspect', windowHandle: handle, maxDepth: 0, maxElements: 1 }),
+      { timeoutMs: 30_000 }
+    );
+    surface = {
+      id: `window-${handle}`,
+      mode: 'shared',
+      windowHandle: handle,
+      processId: inspected.window?.processId || null,
+      name: inspected.window?.name || '',
+      bounds: inspected.window?.bounds || null
+    };
+  }
+  const state = await unifiedAgentEngine.start({ goal: normalizedGoal, mode: normalizedMode, surface, pendingCriteria });
+  activeUnifiedSessions.add(state.sessionId);
+  return state;
+}
+
+function releaseTerminalUnifiedSession(result) {
+  const state = result?.state || result;
+  if (state && ['completed', 'failed', 'cancelled'].includes(state.status)) activeUnifiedSessions.delete(state.sessionId);
+  return result;
 }
 
 async function updateMissionMiniPlanAfterExecution(mission, plan, success) {
@@ -2149,6 +2284,30 @@ await ensureCorePrinciples(config.principlesPath);
 await ensureTeacherProfile(config.teacherProfilePath);
 await refreshDiagnostics();
 
+{
+  const sessionStore = new SessionStore({ directory: config.agentSessionsDirectory, snapshotEvery: 50 });
+  const ledger = new ToolInvocationLedger({ eventStore: sessionStore });
+  const inputArbiter = new InputArbiter({
+    activityProvider: () => readWindowsUserActivity(config.userActivityScript),
+    ttlMs: 250
+  });
+  unifiedToolRegistry = new ToolRegistry({ ledger, policy: unifiedPolicy(), inputArbiter });
+  registerUnifiedRuntimeTools(unifiedToolRegistry);
+  registerRepositoryTools(unifiedToolRegistry, { projectRoot: config.projectRoot });
+  registerCodeCandidateTools(unifiedToolRegistry, {
+    projectRoot: config.projectRoot,
+    candidateRoot: config.teacherSandboxDirectory,
+    backupRoot: config.teacherBackupDirectory
+  });
+  unifiedAgentEngine = new AgentEngine({
+    sessionStore,
+    contextCompiler: new ContextCompiler({ contextWindowTokens: config.unifiedAgentContextTokens }),
+    modelClient: createLmStudioAgentClient({ baseUrl: config.lmStudioBaseUrl }),
+    toolRegistry: unifiedToolRegistry,
+    activeModel: config.activeModel
+  });
+}
+
 if (config.pointerOverlayEnabled) {
   try {
     const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
@@ -2199,6 +2358,66 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${config.host}:${config.workerPort}`);
     requestUrl = url;
 
+    if (request.method === 'POST' && url.pathname === '/agent/sessions') {
+      try {
+        const input = await readJson(request);
+        const state = await startUnifiedAgentSession({
+          goal: input.goal,
+          mode: input.mode,
+          windowHandle: input.windowHandle,
+          pendingCriteria: Array.isArray(input.pendingCriteria) ? input.pendingCriteria : []
+        });
+        return sendJson(response, 201, { sessionId: state.sessionId, state });
+      } catch (error) {
+        return sendJson(response, 400, { error: 'invalid_agent_session', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/agent/sessions/next') {
+      if (rejectWhenPaused(response)) return;
+      const input = await readJson(request);
+      try {
+        return sendJson(response, 200, releaseTerminalUnifiedSession(await unifiedAgentEngine.next(input.sessionId)));
+      } catch (error) {
+        const status = ['session_not_found', 'session_cancelled'].includes(error.code) ? 404 : 500;
+        return sendJson(response, status, { error: error.code || 'agent_turn_failed', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/agent/sessions/message') {
+      const input = await readJson(request);
+      try {
+        return sendJson(response, 200, releaseTerminalUnifiedSession(await unifiedAgentEngine.message(input.sessionId, input.message)));
+      } catch (error) {
+        const status = error.code === 'session_not_found' ? 404 : 400;
+        return sendJson(response, status, { error: error.code || 'agent_message_failed', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/agent/sessions/stop') {
+      const input = await readJson(request);
+      try {
+        const state = await unifiedAgentEngine.stop(input.sessionId, input.reason || 'user_stop');
+        activeUnifiedSessions.delete(input.sessionId);
+        return sendJson(response, 200, { sessionId: input.sessionId, state });
+      } catch (error) {
+        return sendJson(response, error.code === 'session_not_found' ? 404 : 400, {
+          error: error.code || 'agent_stop_failed', message: error.message
+        });
+      }
+    }
+
+    if (request.method === 'GET' && url.pathname === '/agent/sessions/status') {
+      const sessionId = url.searchParams.get('sessionId') || '';
+      try {
+        return sendJson(response, 200, { sessionId, state: await unifiedAgentEngine.status(sessionId) });
+      } catch (error) {
+        return sendJson(response, error.code === 'session_not_found' ? 404 : 400, {
+          error: error.code || 'agent_status_failed', message: error.message
+        });
+      }
+    }
+
       if (request.method === 'GET' && url.pathname === '/health') {
       return sendJson(response, 200, {
         status: diagnosticsError ? 'degraded' : 'ready',
@@ -2223,6 +2442,13 @@ const server = http.createServer(async (request, response) => {
           postActionValidationRoutes: ['uia_postcondition', 'event_stream_no_change', 'qwen_vision']
         },
         modelBroker: modelBroker.status(),
+        unifiedAgent: {
+          activeModel: config.activeModel,
+          activeSessionCount: activeUnifiedSessions.size,
+          stateChangingToolsEnabled: config.unifiedAgentMutationsEnabled,
+          eventLog: { status: 'ready', directory: config.agentSessionsDirectory },
+          toolCount: unifiedToolRegistry.manifests().length
+        },
         selfImprovement: {
           automaticWorkingTreeEdits: false,
           confirmationRequired: true,
@@ -2664,6 +2890,12 @@ const server = http.createServer(async (request, response) => {
         expiresAt: new Date(now + missionTtlMs).toISOString(),
         expiresAtMs: now + missionTtlMs
       };
+      const agentState = await startUnifiedAgentSession({
+        goal: instruction,
+        mode: input.mode === 'anarchy' ? 'autonomous' : 'guided',
+        windowHandle: input.windowHandle
+      });
+      mission.agentSessionId = agentState.sessionId;
       missions.set(missionId, mission);
       await audit('mission.started', {
         missionId, windowHandle: mission.windowHandle, processName: mission.window.processName,
@@ -2764,6 +2996,10 @@ const server = http.createServer(async (request, response) => {
       if (!mission) return sendJson(response, 404, { error: 'mission_not_found', message: 'Mission does not exist.' });
       mission.status = 'cancelled';
       const abortedModelRequests = abortActiveLmStudioRequests('Mission was cancelled by the user.');
+      if (mission.agentSessionId) {
+        await unifiedAgentEngine.stop(mission.agentSessionId, 'legacy_mission_cancelled').catch(() => undefined);
+        activeUnifiedSessions.delete(mission.agentSessionId);
+      }
       await audit('mission.cancelled', { missionId: mission.missionId, stepCount: mission.stepCount, abortedModelRequests });
       missions.delete(mission.missionId);
       return sendJson(response, 200, { missionId: mission.missionId, status: 'cancelled' });

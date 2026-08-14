@@ -23,6 +23,16 @@ function terminalResult(state) {
   return { kind: 'terminal', status: state.status, state };
 }
 
+function modelToolManifest(manifest = {}) {
+  return {
+    name: manifest.name,
+    description: typeof manifest.description === 'string' ? manifest.description : '',
+    risk: manifest.risk,
+    readOnly: manifest.readOnly === true,
+    inputSchema: manifest.inputSchema ?? { type: 'object', additionalProperties: false }
+  };
+}
+
 export class AgentEngine {
   constructor({ sessionStore, contextCompiler, modelClient, toolRegistry, activeModel } = {}) {
     requireDependency(sessionStore, 'start', 'sessionStore');
@@ -57,6 +67,10 @@ export class AgentEngine {
 
   next(sessionId) {
     return this.#serialize(sessionId, () => this.#nextTurn(sessionId));
+  }
+
+  async status(sessionId) {
+    return (await this.sessionStore.load(sessionId)).state;
   }
 
   async message(sessionId, text) {
@@ -117,7 +131,10 @@ export class AgentEngine {
     if (this.cancelReasons.has(sessionId)) controller.abort(abortError(this.cancelReasons.get(sessionId)));
     const requestId = randomUUID();
     try {
-      const context = this.contextCompiler.compile(loaded);
+      const context = {
+        ...this.contextCompiler.compile(loaded),
+        availableTools: this.toolRegistry.manifests().map(modelToolManifest)
+      };
       await this.sessionStore.append(sessionId, {
         type: 'model.requested',
         causationId: requestId,

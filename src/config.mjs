@@ -52,6 +52,8 @@ export const config = Object.freeze({
   virtualPointerScript: path.resolve(moduleDirectory, '..', 'scripts', 'virtual-pointer.ps1'),
   teachingRecorderScript: path.resolve(moduleDirectory, '..', 'scripts', 'teach-recorder.ps1'),
   safetyHotkeyScript: path.resolve(moduleDirectory, '..', 'scripts', 'safety-hotkey.ps1'),
+  userActivityScript: path.resolve(moduleDirectory, '..', 'scripts', 'user-activity.ps1'),
+  agentSessionsDirectory: process.env.AI_WORKSTATION_AGENT_SESSIONS || path.resolve(moduleDirectory, '..', 'artifacts', 'sessions'),
   observationsDirectory: process.env.AI_WORKSTATION_OBSERVATIONS || path.resolve(moduleDirectory, '..', 'artifacts', 'observations'),
   teachingDirectory: process.env.AI_WORKSTATION_TEACHING || path.resolve(moduleDirectory, '..', 'artifacts', 'teaching'),
   skillsDirectory: process.env.AI_WORKSTATION_SKILLS || path.resolve(moduleDirectory, '..', 'artifacts', 'skills'),
@@ -90,5 +92,7 @@ export const config = Object.freeze({
   eventObserverEnabled: readBoolean('AI_WORKSTATION_EVENT_OBSERVER', true),
   eventObserverIntervalMs: readInteger('AI_WORKSTATION_EVENT_INTERVAL_MS', 1_200, { minimum: 250, maximum: 5_000 }),
   eventObserverActiveIntervalMs: readInteger('AI_WORKSTATION_EVENT_ACTIVE_INTERVAL_MS', 200, { minimum: 100, maximum: 1_000 }),
-  visionEnabled: readBoolean('AI_WORKSTATION_VISION_ENABLED', true)
+  visionEnabled: readBoolean('AI_WORKSTATION_VISION_ENABLED', true),
+  unifiedAgentContextTokens: readInteger('AI_WORKSTATION_AGENT_CONTEXT_TOKENS', 12_288, { minimum: 4_096, maximum: 131_072 }),
+  unifiedAgentMutationsEnabled: readBoolean('AI_WORKSTATION_AGENT_MUTATIONS', false)
 });
