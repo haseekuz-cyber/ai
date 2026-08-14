@@ -305,6 +305,18 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/agent/sessions/approve') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/agent/sessions/approve', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 240_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/agent/sessions/message') {
       try {
         const input = await readJson(request);

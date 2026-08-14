@@ -169,3 +169,41 @@ test('a new session context cannot inherit an old goal or error', async () => {
   assert.equal(seen[1].pinned.lastToolResult, null);
   assert.doesNotMatch(JSON.stringify(seen[1]), /Старая цель|ошибка/);
 });
+
+test('guided mutation is proposed, durably approved, and executed at most once', async () => {
+  let effects = 0;
+  const fixture = await createAgentFixture({
+    modelClient: async () => ({ type: 'tool_call', tool: 'test.effect', arguments: { value: 7 }, reason: 'Change locally' })
+  });
+  fixture.toolRegistry.register({
+    name: 'test.effect', risk: 'reversible_local', idempotency: 'at_most_once',
+    inputSchema: {
+      type: 'object', properties: { value: { type: 'number' } }, required: ['value'], additionalProperties: false
+    }
+  }, async ({ value }) => {
+    effects += 1;
+    return { value };
+  });
+  const session = await fixture.engine.start({ goal: 'Измени', mode: 'guided', surface: isolatedSurface });
+  const proposal = await fixture.engine.next(session.sessionId);
+  assert.equal(proposal.kind, 'tool_proposal');
+  assert.equal(proposal.proposal.tool, 'test.effect');
+  assert.equal(effects, 0);
+  assert.equal(proposal.state.status, 'waiting_for_user');
+
+  const completed = await fixture.engine.approve(session.sessionId, proposal.proposal.toolInvocationId);
+  assert.equal(completed.kind, 'tool_result');
+  assert.equal(completed.results[0].status, 'completed');
+  assert.equal(effects, 1);
+  const loaded = await fixture.sessionStore.load(session.sessionId);
+  assert.equal(loaded.state.tools[proposal.proposal.toolInvocationId].approval, 'approved');
+  assert.deepEqual(
+    loaded.events.filter((event) => event.toolInvocationId === proposal.proposal.toolInvocationId).map((event) => event.type),
+    ['tool.proposed', 'tool.approval_recorded', 'tool.dispatched', 'tool.completed']
+  );
+  await assert.rejects(
+    fixture.engine.approve(session.sessionId, proposal.proposal.toolInvocationId),
+    /not waiting|not pending/i
+  );
+  assert.equal(effects, 1);
+});

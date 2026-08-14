@@ -7,7 +7,7 @@ import { createAgentFixture } from './helpers/agent-fixture.mjs';
 test('controller forwards every unified AgentSession route', async () => {
   const controller = await fs.readFile(new URL('../src/controller.mjs', import.meta.url), 'utf8');
   const worker = await fs.readFile(new URL('../src/worker.mjs', import.meta.url), 'utf8');
-  for (const route of ['/agent/sessions', '/agent/sessions/next', '/agent/sessions/message', '/agent/sessions/stop', '/agent/sessions/status']) {
+  for (const route of ['/agent/sessions', '/agent/sessions/next', '/agent/sessions/approve', '/agent/sessions/message', '/agent/sessions/stop', '/agent/sessions/status']) {
     assert.match(controller, new RegExp(`callWorker\\(['"]${route.replaceAll('/', '\\/')}['"]`));
     assert.match(worker, new RegExp(`url\\.pathname === ['"]${route.replaceAll('/', '\\/')}['"]`));
   }
@@ -48,7 +48,9 @@ test('frontend uses one AgentSession identity and canonical autonomous copy', as
   ]);
   assert.match(app, /currentAgentSessionId/);
   assert.match(app, /currentAgentAwaitingUser/);
+  assert.match(app, /currentAgentPendingApproval/);
   assert.match(app, /\/api\/agent\/sessions/);
+  assert.match(app, /\/api\/agent\/sessions\/approve/);
   assert.match(app, /\/api\/agent\/sessions\/message/);
   assert.match(app, /mode:\s*'autonomous'/);
   assert.match(html, />Автономный режим</);

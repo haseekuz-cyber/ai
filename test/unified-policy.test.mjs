@@ -17,6 +17,22 @@ test('guided UI mutation remains two-phase even after a model benchmark passes',
   assert.equal(result.reason, 'user_confirmation_required');
 });
 
+test('guided UI mutation is allowed only for the exact durably approved invocation', async () => {
+  const policy = createUnifiedPolicy({
+    gateProvider: () => ({ allowed: true, reason: 'benchmark_passed' }),
+    sessionProvider: async () => ({
+      mode: 'guided',
+      tools: { approved: { approval: 'approved' }, denied: { approval: 'denied' } }
+    })
+  });
+  assert.equal((await policy.authorize({
+    sessionId: 's', toolInvocationId: 'approved', manifest: manifest('ui.uia', 'reversible_local')
+  })).allowed, true);
+  assert.equal((await policy.authorize({
+    sessionId: 's', toolInvocationId: 'denied', manifest: manifest('ui.uia', 'reversible_local')
+  })).reason, 'user_confirmation_required');
+});
+
 test('autonomous mode can use only gated reversible local tools', async () => {
   const passing = createUnifiedPolicy({ gateProvider: () => ({ allowed: true, reason: 'benchmark_passed' }) });
   assert.equal((await passing.authorize({ manifest: manifest('ui.uia', 'reversible_local'), sessionMode: 'autonomous' })).allowed, true);

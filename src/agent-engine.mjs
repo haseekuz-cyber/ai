@@ -41,6 +41,7 @@ export class AgentEngine {
     requireDependency(contextCompiler, 'compile', 'contextCompiler');
     if (typeof modelClient !== 'function') throw new TypeError('modelClient must be a function.');
     requireDependency(toolRegistry, 'executeBatch', 'toolRegistry');
+    requireDependency(toolRegistry, 'manifest', 'toolRegistry');
     if (typeof activeModel !== 'string' || !activeModel.trim()) throw new TypeError('activeModel is required.');
     this.sessionStore = sessionStore;
     this.contextCompiler = contextCompiler;
@@ -67,6 +68,10 @@ export class AgentEngine {
 
   next(sessionId) {
     return this.#serialize(sessionId, () => this.#nextTurn(sessionId));
+  }
+
+  approve(sessionId, toolInvocationId) {
+    return this.#serialize(sessionId, () => this.#approveTool(sessionId, toolInvocationId));
   }
 
   async status(sessionId) {
@@ -121,6 +126,44 @@ export class AgentEngine {
     return value;
   }
 
+  async #approveTool(sessionId, toolInvocationId) {
+    if (typeof toolInvocationId !== 'string' || !toolInvocationId) throw new TypeError('toolInvocationId is required.');
+    const loaded = await this.sessionStore.load(sessionId);
+    if (loaded.state.status !== 'waiting_for_user') throw new Error('AgentSession is not waiting for tool approval.');
+    const proposal = loaded.state.tools?.[toolInvocationId];
+    if (!proposal || proposal.status !== 'proposed' || proposal.approval) {
+      throw new Error('Tool invocation is not pending approval.');
+    }
+    await this.sessionStore.append(sessionId, {
+      type: 'tool.approval_recorded',
+      toolInvocationId,
+      causationId: proposal.causationId,
+      payload: { approved: true }
+    });
+    await this.sessionStore.append(sessionId, {
+      type: 'session.resumed',
+      causationId: proposal.causationId,
+      payload: { reason: 'tool_approved', toolInvocationId }
+    });
+    const results = await this.toolRegistry.executeBatch({
+      sessionId,
+      surface: loaded.state.surface,
+      calls: [{
+        toolInvocationId,
+        causationId: proposal.causationId,
+        name: proposal.tool,
+        arguments: proposal.arguments
+      }]
+    });
+    return {
+      kind: 'tool_result',
+      decisionId: proposal.causationId,
+      decision: { type: 'tool_call', tool: proposal.tool, arguments: proposal.arguments, reason: 'user_approved' },
+      results,
+      state: (await this.sessionStore.load(sessionId)).state
+    };
+  }
+
   async #nextTurn(sessionId) {
     const loaded = await this.sessionStore.load(sessionId);
     if (loaded.state.status !== 'running') return terminalResult(loaded.state);
@@ -166,6 +209,42 @@ export class AgentEngine {
       if (decision.type === 'tool_call') {
         controller.signal.throwIfAborted();
         const toolInvocationId = randomUUID();
+        const manifest = this.toolRegistry.manifest(decision.tool);
+        if (loaded.state.mode === 'guided' && manifest && manifest.readOnly !== true) {
+          await this.sessionStore.append(sessionId, {
+            type: 'tool.proposed',
+            toolInvocationId,
+            causationId: decisionId,
+            payload: {
+              tool: decision.tool,
+              dispatchIndex: 0,
+              arguments: decision.arguments,
+              risk: manifest.risk
+            }
+          });
+          const { state } = await this.sessionStore.append(sessionId, {
+            type: 'session.waiting_for_user',
+            causationId: decisionId,
+            payload: {
+              reason: 'tool_confirmation_required',
+              question: `Подтвердить выполнение ${decision.tool}?`,
+              toolInvocationId
+            }
+          });
+          return {
+            kind: 'tool_proposal',
+            decisionId,
+            decision,
+            proposal: {
+              toolInvocationId,
+              tool: decision.tool,
+              arguments: decision.arguments,
+              reason: decision.reason,
+              risk: manifest.risk
+            },
+            state
+          };
+        }
         const results = await this.toolRegistry.executeBatch({
           sessionId,
           surface: loaded.state.surface,

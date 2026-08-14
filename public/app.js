@@ -85,6 +85,7 @@ let currentAgentSessionId = null;
 let currentAgentSessionMode = null;
 let currentAgentSessionGoal = null;
 let currentAgentAwaitingUser = false;
+let currentAgentPendingApproval = null;
 let currentMission = null;
 let currentPlan = null;
 let completedStep = null;
@@ -745,6 +746,7 @@ async function stopCurrentAgentSession(reason = 'user_stop') {
   currentAgentSessionMode = null;
   currentAgentSessionGoal = null;
   currentAgentAwaitingUser = false;
+  currentAgentPendingApproval = null;
   if (!sessionId) return;
   try {
     await api('/api/agent/sessions/stop', {
@@ -767,12 +769,16 @@ async function ensureAgentSession({ goal, mode, windowHandle = null }) {
   currentAgentSessionMode = mode;
   currentAgentSessionGoal = goal;
   currentAgentAwaitingUser = false;
+  currentAgentPendingApproval = null;
   return currentAgentSessionId;
 }
 
 function summarizeUnifiedTurn(turn) {
   if (turn.kind === 'final') return turn.decision?.summary || 'Задача завершена.';
   if (turn.kind === 'user_question') return turn.decision?.question || 'JARVIS просит уточнение.';
+  if (turn.kind === 'tool_proposal') {
+    return `JARVIS предлагает ${turn.proposal?.tool || 'локальное действие'}: ${turn.proposal?.reason || 'нужно подтверждение'}`;
+  }
   if (turn.kind === 'tool_result') {
     const result = turn.results?.[0];
     return result?.status === 'completed'
@@ -791,12 +797,22 @@ async function runUnifiedAgentTurn({ autonomous = false } = {}) {
   updateControls();
   try {
     let turn;
-    if (currentAgentAwaitingUser && currentAgentSessionId) {
+    if (currentAgentPendingApproval && currentAgentSessionId) {
+      turn = await api('/api/agent/sessions/approve', {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: currentAgentSessionId,
+          toolInvocationId: currentAgentPendingApproval.toolInvocationId
+        })
+      });
+      currentAgentPendingApproval = null;
+    } else if (currentAgentAwaitingUser && currentAgentSessionId) {
       turn = await api('/api/agent/sessions/message', {
         method: 'POST',
         body: JSON.stringify({ sessionId: currentAgentSessionId, message: inputText })
       });
       currentAgentAwaitingUser = false;
+      currentAgentPendingApproval = null;
     } else {
       const sessionOptions = autonomous
         ? { goal, mode: 'autonomous', windowHandle: selectedWindowHandle }
@@ -815,7 +831,12 @@ async function runUnifiedAgentTurn({ autonomous = false } = {}) {
       currentAgentSessionMode = null;
       currentAgentSessionGoal = null;
       currentAgentAwaitingUser = false;
+      currentAgentPendingApproval = null;
       if (autonomous && anarchyMode) stopAnarchyLoop();
+    } else if (turn.kind === 'tool_proposal') {
+      currentAgentPendingApproval = turn.proposal;
+      taskButton.textContent = 'Подтвердить и выполнить';
+      if (autonomous) anarchyAwaitingCorrection = true;
     } else if (turn.kind === 'user_question') {
       taskInput.value = '';
       taskInput.placeholder = turn.decision?.question || 'Ответьте JARVIS…';
@@ -853,6 +874,7 @@ async function sendUnifiedProgrammerMessage(message) {
         method: 'POST', body: JSON.stringify({ sessionId })
       });
     currentAgentAwaitingUser = false;
+    currentAgentPendingApproval = null;
     if (turn.kind !== 'tool_result') break;
   }
   appendTeacherMessage('assistant', summarizeUnifiedTurn(turn));
@@ -862,6 +884,7 @@ async function sendUnifiedProgrammerMessage(message) {
     currentAgentSessionMode = null;
     currentAgentSessionGoal = null;
     currentAgentAwaitingUser = false;
+    currentAgentPendingApproval = null;
   }
   return turn;
 }
@@ -1871,7 +1894,9 @@ taskInput.addEventListener('input', () => {
     stopCurrentAgentSession('goal_changed');
   }
   resetFeedbackView();
-  taskButton.textContent = currentAgentAwaitingUser
+  taskButton.textContent = currentAgentPendingApproval
+    ? 'Подтвердить и выполнить'
+    : currentAgentAwaitingUser
     ? 'Ответить JARVIS'
     : currentMission ? 'Следующий шаг' : 'Подготовить первый шаг';
   updateControls();

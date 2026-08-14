@@ -87,6 +87,10 @@ export class ToolRegistry {
     return [...this.tools.values()].map(({ manifest }) => manifest);
   }
 
+  manifest(name) {
+    return this.tools.get(name)?.manifest ?? null;
+  }
+
   async executeBatch({ sessionId, calls, surface = null } = {}) {
     if (typeof sessionId !== 'string' || !sessionId) throw new TypeError('sessionId is required.');
     if (!Array.isArray(calls) || calls.length === 0) throw new TypeError('At least one tool call is required.');
@@ -156,6 +160,7 @@ export class ToolRegistry {
     const risk = resolveToolRisk(call.manifest, call.arguments);
     const authorization = await this.policy.authorize({
       sessionId,
+      toolInvocationId: call.toolInvocationId,
       manifest: call.manifest,
       arguments: call.arguments,
       risk,

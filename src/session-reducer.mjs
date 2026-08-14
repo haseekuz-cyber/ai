@@ -6,6 +6,7 @@ const TERMINAL_STATUS_BY_EVENT = Object.freeze({
 });
 
 const TOOL_STATUS_BY_EVENT = Object.freeze({
+  'tool.proposed': 'proposed',
   'tool.requested': 'requested',
   'tool.dispatched': 'dispatched',
   'tool.completed': 'completed',
@@ -63,6 +64,7 @@ function reduceToolEvent(state, event, status) {
   if (payload.arguments != null) toolEntry.arguments = cloneJson(payload.arguments);
   if (payload.result != null) toolEntry.result = cloneJson(payload.result);
   if (payload.error != null) toolEntry.error = cloneJson(payload.error);
+  if (event.causationId != null) toolEntry.causationId = event.causationId;
 
   const next = {
     ...state,
@@ -107,6 +109,21 @@ export function reduceSessionEvent(currentState, event = {}) {
   const toolStatus = TOOL_STATUS_BY_EVENT[event.type];
   if (toolStatus) {
     state = reduceToolEvent(state, event, toolStatus);
+  } else if (event.type === 'tool.approval_recorded') {
+    const previous = state.tools[event.toolInvocationId];
+    if (!previous || previous.status !== 'proposed') {
+      throw new Error(`Tool ${event.toolInvocationId} is not pending approval.`);
+    }
+    state = {
+      ...state,
+      tools: {
+        ...state.tools,
+        [event.toolInvocationId]: {
+          ...previous,
+          approval: event.payload?.approved === true ? 'approved' : 'denied'
+        }
+      }
+    };
   } else if (event.type === 'user.message') {
     state = {
       ...state,

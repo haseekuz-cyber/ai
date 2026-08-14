@@ -2405,6 +2405,16 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
+    if (config.unifiedAgentEnabled && request.method === 'POST' && url.pathname === '/agent/sessions/approve') {
+      if (rejectWhenPaused(response)) return;
+      const input = await readJson(request);
+      try {
+        return sendJson(response, 200, await unifiedAgentEngine.approve(input.sessionId, input.toolInvocationId));
+      } catch (error) {
+        return sendJson(response, 400, { error: 'agent_approval_failed', message: error.message });
+      }
+    }
+
     if (config.unifiedAgentEnabled && request.method === 'POST' && url.pathname === '/agent/sessions/message') {
       const input = await readJson(request);
       try {

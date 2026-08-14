@@ -13,6 +13,8 @@ const EVENT_FIELDS = new Set([
 ]);
 
 const TOOL_LIFECYCLE_TYPES = new Set([
+  'tool.proposed',
+  'tool.approval_recorded',
   'tool.requested',
   'tool.dispatched',
   'tool.completed',
