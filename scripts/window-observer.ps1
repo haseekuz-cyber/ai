@@ -8,7 +8,11 @@ param(
     [double]$CellDeltaThreshold = 0.045,
     [string]$KeyframeDirectory = '',
     [int]$KeyframeMinIntervalMs = 450,
-    [int]$KeyframeMaxWidth = 960
+    [int]$KeyframeMaxWidth = 960,
+    [int]$CaptureX = 0,
+    [int]$CaptureY = 0,
+    [int]$CaptureWidth = 0,
+    [int]$CaptureHeight = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -142,7 +146,7 @@ function Save-ObserverKeyframe {
 $IntervalMs = [math]::Min(2000, [math]::Max(100, $IntervalMs))
 $Columns = [math]::Min(64, [math]::Max(8, $Columns))
 $Rows = [math]::Min(36, [math]::Max(6, $Rows))
-$CellDeltaThreshold = [math]::Min(1, [math]::Max(0.005, $CellDeltaThreshold))
+$CellDeltaThreshold = [double][math]::Min(1.0, [math]::Max(0.005, [double]$CellDeltaThreshold))
 $KeyframeMinIntervalMs = [math]::Min(5000, [math]::Max(200, $KeyframeMinIntervalMs))
 $KeyframeMaxWidth = [math]::Min(1920, [math]::Max(480, $KeyframeMaxWidth))
 if ($KeyframeDirectory) {
@@ -153,6 +157,7 @@ $handle = [System.IntPtr]::new($WindowHandle)
 $previousBytes = $null
 $previousSignature = $null
 $previousBounds = $null
+$previousTargetBounds = $null
 $sequence = 0
 $consecutiveErrors = 0
 $lastKeyframeAt = [DateTimeOffset]::MinValue
@@ -171,30 +176,30 @@ while (Test-ParentAlive) {
         if (-not [WindowObserverNative]::GetWindowRect($handle, [ref]$rectangle)) {
             throw 'GetWindowRect failed.'
         }
-        $width = $rectangle.Right - $rectangle.Left
-        $height = $rectangle.Bottom - $rectangle.Top
+        $targetBounds = [ordered]@{
+            x = $rectangle.Left
+            y = $rectangle.Top
+            width = $rectangle.Right - $rectangle.Left
+            height = $rectangle.Bottom - $rectangle.Top
+        }
+        $left = if ($CaptureWidth -gt 0 -and $CaptureHeight -gt 0) { $CaptureX } else { $rectangle.Left }
+        $top = if ($CaptureWidth -gt 0 -and $CaptureHeight -gt 0) { $CaptureY } else { $rectangle.Top }
+        $width = if ($CaptureWidth -gt 0 -and $CaptureHeight -gt 0) { $CaptureWidth } else { $targetBounds.width }
+        $height = if ($CaptureWidth -gt 0 -and $CaptureHeight -gt 0) { $CaptureHeight } else { $targetBounds.height }
         if ($width -le 0 -or $height -le 0 -or $width -gt 8192 -or $height -gt 8192) {
             throw "Invalid window dimensions: ${width}x${height}."
         }
 
         $bitmap = [System.Drawing.Bitmap]::new($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        $graphics.Clear([System.Drawing.Color]::Black)
-        $deviceContext = $graphics.GetHdc()
-        try {
-            $captured = [WindowObserverNative]::PrintWindow($handle, $deviceContext, 2)
-        }
-        finally {
-            $graphics.ReleaseHdc($deviceContext)
-        }
-        if (-not $captured) { throw 'PrintWindow did not return a frame.' }
+        $graphics.CopyFromScreen($left, $top, 0, 0, [System.Drawing.Size]::new($width, $height), [System.Drawing.CopyPixelOperation]::SourceCopy)
 
         [byte[]]$sampleBytes = @(Get-SampleBytes -Bitmap $bitmap -SampleColumns $Columns -SampleRows $Rows)
         $signature = Get-Signature -Bytes $sampleBytes
-        $bounds = [ordered]@{ x = $rectangle.Left; y = $rectangle.Top; width = $width; height = $height }
-        $geometryChanged = $null -ne $previousBounds -and (
-            $previousBounds.x -ne $bounds.x -or $previousBounds.y -ne $bounds.y -or
-            $previousBounds.width -ne $bounds.width -or $previousBounds.height -ne $bounds.height
+        $bounds = [ordered]@{ x = $left; y = $top; width = $width; height = $height }
+        $geometryChanged = $null -ne $previousTargetBounds -and (
+            $previousTargetBounds.x -ne $targetBounds.x -or $previousTargetBounds.y -ne $targetBounds.y -or
+            $previousTargetBounds.width -ne $targetBounds.width -or $previousTargetBounds.height -ne $targetBounds.height
         )
         $changedCells = [System.Collections.Generic.List[object]]::new()
         if ($null -ne $previousBytes -and $previousSignature -ne $signature -and $previousBytes.Length -eq $sampleBytes.Length) {
@@ -220,7 +225,28 @@ while (Test-ParentAlive) {
         $keyframePath = $null
         $isFirstFrame = $null -eq $previousBytes
         $isMeaningfulChange = $geometryChanged -or $changedCells.Count -gt 0
-        if ($KeyframeDirectory -and ($isFirstFrame -or ($isMeaningfulChange -and ($now - $lastKeyframeAt).TotalMilliseconds -ge $KeyframeMinIntervalMs))) {
+        $importance = if ($isFirstFrame) {
+            'critical'
+        }
+        elseif ($geometryChanged -or $changedFraction -ge 0.18) {
+            'critical'
+        }
+        elseif ($changedFraction -ge 0.055) {
+            'high'
+        }
+        elseif ($changedFraction -ge 0.012) {
+            'normal'
+        }
+        else {
+            'low'
+        }
+        $importanceIntervalMs = switch ($importance) {
+            'critical' { [math]::Max(200, [int]($KeyframeMinIntervalMs * 0.45)) }
+            'high' { [math]::Max(250, [int]($KeyframeMinIntervalMs * 0.7)) }
+            'normal' { $KeyframeMinIntervalMs }
+            default { [math]::Max(900, [int]($KeyframeMinIntervalMs * 2.0)) }
+        }
+        if ($KeyframeDirectory -and ($isFirstFrame -or ($isMeaningfulChange -and ($now - $lastKeyframeAt).TotalMilliseconds -ge $importanceIntervalMs))) {
             $keyframePath = Save-ObserverKeyframe -Bitmap $bitmap -Directory $KeyframeDirectory `
                 -Handle $WindowHandle -Sequence $sequence -MaximumWidth $KeyframeMaxWidth
             $lastKeyframeAt = $now
@@ -232,12 +258,14 @@ while (Test-ParentAlive) {
             capturedAt = (Get-Date).ToUniversalTime().ToString('o')
             windowHandle = $WindowHandle
             bounds = $bounds
+            targetWindowBounds = $targetBounds
             columns = $Columns
             rows = $Rows
             signature = $signature
             changedFromPrevious = ($geometryChanged -or $changedCells.Count -gt 0)
             geometryChanged = $geometryChanged
             changedFraction = [math]::Round($changedFraction, 6)
+            importance = $importance
             changedCells = @($changedCells)
             keyframePath = $keyframePath
             captureElapsedMs = $started.ElapsedMilliseconds
@@ -245,6 +273,7 @@ while (Test-ParentAlive) {
         $previousBytes = $sampleBytes
         $previousSignature = $signature
         $previousBounds = $bounds
+        $previousTargetBounds = $targetBounds
         $consecutiveErrors = 0
     }
     catch {

@@ -11,7 +11,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 Add-Type -AssemblyName System.Drawing
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
 
 if ($Width -lt 32 -or $Height -lt 32 -or $Width -gt 1200 -or $Height -gt 1200) {
     throw 'Crop dimensions must be between 32 and 1200 pixels.'
@@ -50,7 +65,7 @@ try {
         $outputDirectory = [System.IO.Path]::GetDirectoryName($outputFullPath)
         [System.IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
         $target.Save($outputFullPath, [System.Drawing.Imaging.ImageFormat]::Png)
-        $hash = (Get-FileHash -LiteralPath $outputFullPath -Algorithm SHA256).Hash
+        $hash = Get-Sha256Hex -LiteralPath $outputFullPath
         [pscustomobject]@{
             schemaVersion = 1
             sourceBounds = [pscustomobject]@{ x = $left; y = $top; width = $cropWidth; height = $cropHeight }
@@ -66,4 +81,3 @@ try {
 finally {
     $source.Dispose()
 }
-

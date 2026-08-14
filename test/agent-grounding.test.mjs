@@ -437,3 +437,19 @@ test('low-confidence visual text grounding is blocked', async () => {
     execute: async () => 'unexpected'
   }), (error) => error.code === 'grounding_blocked');
 });
+
+test('explicit exploratory grounding uses the same final decision and may execute once', async () => {
+  let calls = 0;
+  const result = await executeGroundedAction({
+    action: { type: 'click' },
+    grounding: {
+      blocked: false,
+      exploratory: true,
+      reason: 'anarchy_unverified_visual_probe',
+      confidence: 0
+    },
+    execute: async () => { calls += 1; return 'probe'; }
+  });
+  assert.equal(result, 'probe');
+  assert.equal(calls, 1);
+});

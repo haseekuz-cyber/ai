@@ -60,3 +60,15 @@ test('anarchy pauses for a human instead of spinning forever', () => {
   assert.equal(decision.delayMs, null);
   assert.match(decision.report, /приостановлен/);
 });
+
+test('an infrastructure capture failure stops retries and is never learned as a bad UI action', () => {
+  const decision = decideAnarchyRecovery(createAnarchyRecoveryState(), {
+    missionId: 'mission-1',
+    errorCode: 'display_capture_failed',
+    message: 'capture-display.ps1 failed'
+  });
+  assert.equal(decision.action, 'infrastructure_error');
+  assert.equal(decision.shouldRecordCorrection, false);
+  assert.equal(decision.delayMs, null);
+  assert.match(decision.report, /технического слоя/);
+});

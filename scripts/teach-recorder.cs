@@ -33,6 +33,7 @@ public static class AIWorkstationTeachRecorder
     public sealed class RecorderConfig
     {
         public long targetWindowHandle;
+        public bool captureAllWindows;
         public BoundsConfig allowedBounds;
         public string outputPath;
         public string livePath;
@@ -61,6 +62,11 @@ public static class AIWorkstationTeachRecorder
         public string source;
         public string[] modifiers;
         public long sequence;
+        public long windowHandle;
+        public int processId;
+        public string processName;
+        public string windowName;
+        public BoundsConfig windowBounds;
     }
     public sealed class RecordedFrame
     {
@@ -68,6 +74,7 @@ public static class AIWorkstationTeachRecorder
         public int logicalEventCount;
         public long atMs;
         public string imagePath;
+        public string reason;
     }
     public sealed class RecorderOutput
     {
@@ -81,7 +88,7 @@ public static class AIWorkstationTeachRecorder
         public string stopReason;
     }
 
-    private sealed class PendingPointer { public POINT Point; public long AtMs; public string Button; public string[] Modifiers; }
+    private sealed class PendingPointer { public POINT Point; public long AtMs; public string Button; public string[] Modifiers; public IntPtr RootWindow; }
     private sealed class RecordingContext : ApplicationContext
     {
         public readonly System.Windows.Forms.Timer Timer;
@@ -125,6 +132,7 @@ public static class AIWorkstationTeachRecorder
     private static long nextSequence;
     private static long lastCapturedSequence;
     private static bool evidenceWarningWritten;
+    private static IntPtr lastObservedForegroundRoot;
     private static volatile bool hotkeyStopRequested;
     private static string stopReason = "controller";
 
@@ -135,6 +143,7 @@ public static class AIWorkstationTeachRecorder
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int maxCount);
     [DllImport("user32.dll")] private static extern bool GetKeyboardState(byte[] keyState);
     [DllImport("user32.dll")] private static extern IntPtr GetKeyboardLayout(uint threadId);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
@@ -152,7 +161,7 @@ public static class AIWorkstationTeachRecorder
             if (args.Length != 1) throw new ArgumentException("One Base64 configuration argument is required.");
             string json = Encoding.UTF8.GetString(Convert.FromBase64String(args[0]));
             config = new JavaScriptSerializer().Deserialize<RecorderConfig>(json);
-            if (config == null || config.allowedBounds == null || config.targetWindowHandle <= 0) throw new ArgumentException("Recorder configuration is invalid.");
+            if (config == null || config.allowedBounds == null || (!config.captureAllWindows && config.targetWindowHandle <= 0)) throw new ArgumentException("Recorder configuration is invalid.");
             targetHandle = new IntPtr(config.targetWindowHandle);
             startedAt = DateTime.UtcNow.ToString("o");
             Clock.Start();
@@ -162,8 +171,10 @@ public static class AIWorkstationTeachRecorder
             mouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseProc, module, 0);
             keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardProc, module, 0);
             if (mouseHook == IntPtr.Zero || keyboardHook == IntPtr.Zero) throw new InvalidOperationException("Could not install teaching hooks.");
-            TrySubscribeValueChanges();
+            if (!config.captureAllWindows) TrySubscribeValueChanges();
             Directory.CreateDirectory(Path.GetDirectoryName(config.outputPath));
+            lastObservedForegroundRoot = GetAncestor(GetForegroundWindow(), GA_ROOT);
+            CaptureVisualEvidence(true, "initial");
             WriteSnapshot(config.livePath, false);
             File.WriteAllText(config.readyPath, DateTime.UtcNow.ToString("o"), new UTF8Encoding(false));
             context = new RecordingContext();
@@ -286,14 +297,25 @@ public static class AIWorkstationTeachRecorder
             MSLLHOOKSTRUCT data = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
             int message = wParam.ToInt32();
             if (message == WM_MOUSEMOVE && PointBelongsToTarget(data.pt)) RecordPointerMove(data.pt);
-            else if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt)) leftDown = NewPending(data.pt, "left", GetActiveModifiers());
-            else if (message == WM_RBUTTONDOWN && PointBelongsToTarget(data.pt)) rightDown = NewPending(data.pt, "right", GetActiveModifiers());
+            else if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt))
+            {
+                CaptureVisualEvidence(true, "before-pointer-action");
+                leftDown = NewPending(data.pt, "left", GetActiveModifiers());
+            }
+            else if (message == WM_RBUTTONDOWN && PointBelongsToTarget(data.pt))
+            {
+                CaptureVisualEvidence(true, "before-pointer-action");
+                rightDown = NewPending(data.pt, "right", GetActiveModifiers());
+            }
             else if (message == WM_LBUTTONUP) CompletePointer(leftDown, data.pt);
             else if (message == WM_RBUTTONUP) CompletePointer(rightDown, data.pt);
             else if (message == WM_MOUSEWHEEL && PointBelongsToTarget(data.pt))
             {
+                CaptureVisualEvidence(true, "before-scroll");
                 short delta = unchecked((short)((data.mouseData >> 16) & 0xffff));
-                AddEvent(new RecordedEvent { type = "scroll", atMs = Clock.ElapsedMilliseconds, x = data.pt.X, y = data.pt.Y, delta = delta, source = "pointer-hook" });
+                RecordedEvent item = new RecordedEvent { type = "scroll", atMs = Clock.ElapsedMilliseconds, x = data.pt.X, y = data.pt.Y, delta = delta, source = "pointer-hook" };
+                PopulatePointerTarget(item, data.pt);
+                AddEvent(item);
             }
             if (message == WM_LBUTTONUP) leftDown = null;
             if (message == WM_RBUTTONUP) rightDown = null;
@@ -313,8 +335,9 @@ public static class AIWorkstationTeachRecorder
 
     private static IntPtr KeyboardHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
+        IntPtr foregroundRoot = GetAncestor(GetForegroundWindow(), GA_ROOT);
         if (nCode >= 0 && !stopping && (wParam.ToInt32() == WM_KEYDOWN || wParam.ToInt32() == WM_SYSKEYDOWN) &&
-            GetAncestor(GetForegroundWindow(), GA_ROOT) == targetHandle)
+            WindowBelongsToScope(foregroundRoot))
         {
             KBDLLHOOKSTRUCT data = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
             Keys key = (Keys)data.vkCode;
@@ -329,6 +352,7 @@ public static class AIWorkstationTeachRecorder
             string typedText = safeKey == null ? TranslateKeyToText(data) : null;
             if (safeKey != null || previewKey != null || typedText != null)
             {
+                if (safeKey != null) CaptureVisualEvidence(true, "before-key-action");
                 lastKeyboardAtMs = Clock.ElapsedMilliseconds;
                 RecordedEvent item = new RecordedEvent {
                     type = safeKey != null ? "pressKey" : (typedText != null ? "typeText" : "keyPreview"),
@@ -337,10 +361,12 @@ public static class AIWorkstationTeachRecorder
                     text = typedText,
                     source = "keyboard-hook"
                 };
+                PopulateWindowContext(item, foregroundRoot);
                 try
                 {
                     AutomationElement focused = AutomationElement.FocusedElement;
-                    if (focused != null && targetAutomation != null && focused.Current.ProcessId == targetAutomation.Current.ProcessId)
+                    if (focused != null && (config.captureAllWindows ||
+                        (targetAutomation != null && focused.Current.ProcessId == targetAutomation.Current.ProcessId)))
                     {
                         System.Windows.Rect bounds = focused.Current.BoundingRectangle;
                         item.x = (int)Math.Round(bounds.X + bounds.Width / 2);
@@ -451,7 +477,13 @@ public static class AIWorkstationTeachRecorder
 
     private static PendingPointer NewPending(POINT point, string button, string[] modifiers)
     {
-        return new PendingPointer { Point = point, AtMs = Clock.ElapsedMilliseconds, Button = button, Modifiers = modifiers };
+        return new PendingPointer {
+            Point = point,
+            AtMs = Clock.ElapsedMilliseconds,
+            Button = button,
+            Modifiers = modifiers,
+            RootWindow = GetAncestor(WindowFromPoint(point), GA_ROOT)
+        };
     }
 
     private static void CompletePointer(PendingPointer pending, POINT end)
@@ -464,7 +496,7 @@ public static class AIWorkstationTeachRecorder
         int dy = end.Y - pending.Point.Y;
         int duration = (int)Math.Min(Int32.MaxValue, Clock.ElapsedMilliseconds - pending.AtMs);
         bool drag = dx * dx + dy * dy > 36;
-        AddEvent(new RecordedEvent {
+        RecordedEvent item = new RecordedEvent {
             type = drag ? "drag" : "click",
             atMs = pending.AtMs,
             x = pending.Point.X,
@@ -475,15 +507,81 @@ public static class AIWorkstationTeachRecorder
             button = pending.Button,
             modifiers = drag && pending.Modifiers != null && pending.Modifiers.Length > 0 ? pending.Modifiers : null,
             source = "pointer-hook"
-        });
+        };
+        PopulateWindowContext(item, pending.RootWindow);
+        PopulateAutomationTarget(item, pending.Point);
+        AddEvent(item);
+    }
+
+    private static bool PointInsideAllowedBounds(POINT point)
+    {
+        BoundsConfig b = config.allowedBounds;
+        return point.X >= b.x && point.Y >= b.y && point.X < b.x + b.width && point.Y < b.y + b.height;
+    }
+
+    private static bool WindowBelongsToScope(IntPtr root)
+    {
+        if (root == IntPtr.Zero) return false;
+        if (!config.captureAllWindows) return root == targetHandle;
+        RECT rect;
+        if (!GetWindowRect(root, out rect)) return false;
+        BoundsConfig b = config.allowedBounds;
+        return rect.Right > b.x && rect.Bottom > b.y && rect.Left < b.x + b.width && rect.Top < b.y + b.height;
     }
 
     private static bool PointBelongsToTarget(POINT point)
     {
-        BoundsConfig b = config.allowedBounds;
-        if (point.X < b.x || point.Y < b.y || point.X >= b.x + b.width || point.Y >= b.y + b.height) return false;
+        if (!PointInsideAllowedBounds(point)) return false;
         IntPtr hit = WindowFromPoint(point);
-        return hit != IntPtr.Zero && GetAncestor(hit, GA_ROOT) == targetHandle;
+        return hit != IntPtr.Zero && WindowBelongsToScope(GetAncestor(hit, GA_ROOT));
+    }
+
+    private static void PopulatePointerTarget(RecordedEvent item, POINT point)
+    {
+        IntPtr root = GetAncestor(WindowFromPoint(point), GA_ROOT);
+        PopulateWindowContext(item, root);
+        PopulateAutomationTarget(item, point);
+    }
+
+    private static void PopulateAutomationTarget(RecordedEvent item, POINT point)
+    {
+        try
+        {
+            AutomationElement element = AutomationElement.FromPoint(new System.Windows.Point(point.X, point.Y));
+            if (element == null) return;
+            item.automationId = element.Current.AutomationId;
+            item.name = element.Current.Name;
+            item.controlType = element.Current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+            item.sensitive = element.Current.IsPassword;
+        }
+        catch { }
+    }
+
+    private static void PopulateWindowContext(RecordedEvent item, IntPtr root)
+    {
+        if (item == null || root == IntPtr.Zero) return;
+        item.windowHandle = root.ToInt64();
+        uint processId;
+        GetWindowThreadProcessId(root, out processId);
+        item.processId = unchecked((int)processId);
+        try { item.processName = Process.GetProcessById(item.processId).ProcessName; } catch { }
+        try
+        {
+            StringBuilder title = new StringBuilder(1024);
+            GetWindowText(root, title, title.Capacity);
+            item.windowName = title.ToString();
+        }
+        catch { }
+        RECT rect;
+        if (GetWindowRect(root, out rect))
+        {
+            item.windowBounds = new BoundsConfig {
+                x = rect.Left,
+                y = rect.Top,
+                width = Math.Max(0, rect.Right - rect.Left),
+                height = Math.Max(0, rect.Bottom - rect.Top)
+            };
+        }
     }
 
     private static void AddEvent(RecordedEvent item)
@@ -519,7 +617,7 @@ public static class AIWorkstationTeachRecorder
         return item != null && item.type != "pointerMove" && item.type != "keyPreview";
     }
 
-    private static void CaptureVisualEvidence(bool force)
+    private static void CaptureVisualEvidence(bool force, string reason = "after-action")
     {
         if (String.IsNullOrEmpty(config.evidenceDirectory)) return;
         long throughSequence = 0;
@@ -540,7 +638,16 @@ public static class AIWorkstationTeachRecorder
         try
         {
             RECT rect;
-            if (!GetWindowRect(targetHandle, out rect)) throw new InvalidOperationException("Could not read target window bounds.");
+            if (config.captureAllWindows)
+            {
+                rect = new RECT {
+                    Left = config.allowedBounds.x,
+                    Top = config.allowedBounds.y,
+                    Right = config.allowedBounds.x + config.allowedBounds.width,
+                    Bottom = config.allowedBounds.y + config.allowedBounds.height
+                };
+            }
+            else if (!GetWindowRect(targetHandle, out rect)) throw new InvalidOperationException("Could not read target window bounds.");
             int width = rect.Right - rect.Left;
             int height = rect.Bottom - rect.Top;
             if (width <= 0 || height <= 0) throw new InvalidOperationException("Target window bounds are empty.");
@@ -567,7 +674,8 @@ public static class AIWorkstationTeachRecorder
                     throughSequence = throughSequence,
                     logicalEventCount = logicalCount,
                     atMs = Clock.ElapsedMilliseconds,
-                    imagePath = imagePath
+                    imagePath = imagePath,
+                    reason = reason
                 });
             }
             lastCapturedSequence = throughSequence;
@@ -585,7 +693,16 @@ public static class AIWorkstationTeachRecorder
     private static void CheckStop()
     {
         if (stopping) return;
-        CaptureVisualEvidence(false);
+        if (config.captureAllWindows)
+        {
+            IntPtr foregroundRoot = GetAncestor(GetForegroundWindow(), GA_ROOT);
+            if (foregroundRoot != IntPtr.Zero && foregroundRoot != lastObservedForegroundRoot)
+            {
+                lastObservedForegroundRoot = foregroundRoot;
+                CaptureVisualEvidence(true, "window-change");
+            }
+        }
+        CaptureVisualEvidence(false, "after-action");
         WriteLiveSnapshot();
         if (hotkeyStopRequested) Stop("hotkey");
         else if (File.Exists(config.stopPath)) Stop("controller");
@@ -624,7 +741,7 @@ public static class AIWorkstationTeachRecorder
     {
         stopping = true;
         stopReason = String.IsNullOrEmpty(reason) ? "controller" : reason;
-        CaptureVisualEvidence(true);
+        CaptureVisualEvidence(true, "final");
         WriteSnapshot(config.outputPath, true);
         context.ExitThread();
     }

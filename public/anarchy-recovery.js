@@ -27,6 +27,21 @@ export function decideAnarchyRecovery(state, {
   const repeated = previous.fingerprint === fingerprint ? previous.repeated + 1 : 1;
   const total = previous.total + 1;
   const nextState = { missionId, fingerprint, repeated, total };
+  const infrastructureFailure = [
+    'display_capture_failed', 'worker_unavailable', 'model_unavailable',
+    'ECONNREFUSED', 'ENOENT'
+  ].includes(errorCode) ||
+    /capture-display\.ps1|capture-window\.ps1|Get-FileHash|CommandNotFoundException|ECONNREFUSED|worker unavailable|LM Studio.+(?:unreachable|not reachable)/i
+      .test(message);
+  if (infrastructureFailure) {
+    return {
+      state: nextState,
+      action: 'infrastructure_error',
+      shouldRecordCorrection: false,
+      delayMs: null,
+      report: 'Остановлен только автоповтор: это сбой технического слоя, а не ошибка навыка или модели. После восстановления компонента можно продолжить свободный режим.'
+    };
+  }
   const staleContext = ['stale_mission', 'mission_not_active', 'target_window_changed', 'active_document_changed']
     .includes(errorCode);
   if (repeated >= 3 || total >= 5) {

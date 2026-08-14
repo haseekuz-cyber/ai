@@ -45,7 +45,7 @@ function recordedDragTrajectory(event, recordingEvents, bounds, maxPoints = 500)
       .filter((candidate) => candidate.type === 'pointerMove' && Number(candidate.atMs) >= startedAt && Number(candidate.atMs) <= endedAt)
       .map((candidate) => ({ x: candidate.x, y: candidate.y })),
     { x: event.toX, y: event.toY }
-  ].filter((point) => Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)));
+  ].filter((point) => Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)) && contains(bounds, Number(point.x), Number(point.y)));
   const stride = Math.max(1, Math.ceil(candidates.length / maxPoints));
   const normalized = candidates
     .filter((_, index) => index % stride === 0 || index === candidates.length - 1)
@@ -172,7 +172,8 @@ function normalizedVisualFrame(frame) {
     sha256: typeof frame.sha256 === 'string' ? frame.sha256 : null,
     capturedAt: typeof frame.capturedAt === 'string' ? frame.capturedAt : null,
     atMs: Number.isFinite(Number(frame.atMs)) ? Math.max(0, Math.round(Number(frame.atMs))) : null,
-    throughSequence: Number.isFinite(Number(frame.throughSequence)) ? Number(frame.throughSequence) : null
+    throughSequence: Number.isFinite(Number(frame.throughSequence)) ? Number(frame.throughSequence) : null,
+    reason: typeof frame.reason === 'string' ? frame.reason.slice(0, 80) : null
   };
 }
 
@@ -237,6 +238,9 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
     const target = Number.isFinite(Number(event.x)) && Number.isFinite(Number(event.y))
       ? smallestElementAt(elements, Number(event.x), Number(event.y))
       : null;
+    const stepBounds = event.windowBounds?.width > 0 && event.windowBounds?.height > 0
+      ? event.windowBounds
+      : window.bounds;
     const step = {
       index: steps.length,
       type: event.type,
@@ -245,21 +249,29 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       expectedResult: expectedResultForEvent(event),
       requiresConfirmation: true
     };
+    if (event.processName || event.windowName || event.windowHandle) {
+      step.windowContext = {
+        processName: event.processName || window.processName,
+        titleAtRecording: event.windowName || window.name,
+        nativeWindowHandleAtRecording: Number(event.windowHandle) || null,
+        recordedBounds: stepBounds
+      };
+    }
     if (['click', 'doubleClick', 'scroll', 'typeText', 'pressKey'].includes(event.type) &&
         Number.isFinite(Number(event.x)) && Number.isFinite(Number(event.y))) {
-      step.point = normalizePointToWindow({ x: event.x, y: event.y }, window.bounds);
+      step.point = normalizePointToWindow({ x: event.x, y: event.y }, stepBounds);
     }
     if (event.type === 'click' || event.type === 'doubleClick') step.button = event.button === 'right' ? 'right' : 'left';
     if (event.type === 'scroll') step.delta = Math.min(Math.max(Math.round(Number(event.delta) || 0), -1_200), 1_200);
     if (event.type === 'drag') {
-      step.from = normalizePointToWindow({ x: event.x, y: event.y }, window.bounds);
-      step.to = normalizePointToWindow({ x: event.toX, y: event.toY }, window.bounds);
+      step.from = normalizePointToWindow({ x: event.x, y: event.y }, stepBounds);
+      step.to = normalizePointToWindow({ x: event.toX, y: event.toY }, stepBounds);
       step.durationMs = Math.min(Math.max(Math.round(Number(event.durationMs) || 350), 50), 5_000);
       step.button = event.button === 'right' ? 'right' : 'left';
       const modifiers = normalizeInputModifiers(event.modifiers, { label: 'recording event modifiers' });
       if (modifiers.length > 0) step.modifiers = modifiers;
       step.trajectoryMode = classifyTrajectoryMode(event, target);
-      step.trajectory = recordedDragTrajectory(event, recording?.events ?? [], window.bounds);
+      step.trajectory = recordedDragTrajectory(event, recording?.events ?? [], stepBounds);
     }
     if (event.type === 'typeText') {
       if (typeof event.text !== 'string') {
@@ -297,16 +309,21 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
     createdAt: new Date().toISOString(),
     source: 'live-demonstration',
     application: {
-      processName: window.processName,
+      processName: recording?.primaryApplication?.processName || window.processName,
       className: window.className,
-      titleAtRecording: window.name,
-      recordedBounds: window.bounds
+      titleAtRecording: recording?.primaryApplication?.windowName || window.name,
+      recordedBounds: recording?.primaryApplication?.windowBounds || window.bounds
     },
     safety: {
       defaultRequiresConfirmation: true,
       passwordValuesStored: false
     },
-    demonstration: summarizeDemonstration(recording, window.bounds),
+    demonstration: {
+      ...summarizeDemonstration(recording, recording?.captureBounds || window.bounds),
+      captureScope: recording?.captureScope || 'window',
+      guidance: Array.isArray(recording?.guidance) ? recording.guidance : [],
+      observedApplications: Array.isArray(recording?.observedApplications) ? recording.observedApplications : []
+    },
     steps,
     warnings: [...new Set(warnings)]
   };

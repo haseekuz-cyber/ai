@@ -9,6 +9,20 @@ $ErrorActionPreference = 'Stop'
 $OutputEncoding = [Console]::OutputEncoding
 
 Add-Type -AssemblyName System.Drawing
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -84,7 +98,7 @@ finally {
 }
 
 $file = Get-Item -LiteralPath $resolvedOutput
-$hash = Get-FileHash -LiteralPath $resolvedOutput -Algorithm SHA256
+$hash = Get-Sha256Hex -LiteralPath $resolvedOutput
 [ordered]@{
     schemaVersion = 1
     capturedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -97,5 +111,5 @@ $hash = Get-FileHash -LiteralPath $resolvedOutput -Algorithm SHA256
     }
     outputPath = $resolvedOutput
     bytes = $file.Length
-    sha256 = $hash.Hash
+    sha256 = $hash
 } | ConvertTo-Json -Depth 5 -Compress

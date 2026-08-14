@@ -13,10 +13,8 @@ export function resolveCaptureTarget(diagnostics, configuredDeviceName) {
     return matches[0];
   }
 
-  if (screens.length !== 1) {
-    throw new Error('The Worker sees multiple displays. Set AI_WORKSTATION_DISPLAY explicitly before capture.');
-  }
-
-  return screens[0];
+  const secondaryScreens = screens.filter((screen) => !screen.primary);
+  if (secondaryScreens.length === 1) return secondaryScreens[0];
+  if (screens.length === 1) return screens[0];
+  throw new Error('Set AI_WORKSTATION_DISPLAY because the Worker sees multiple secondary displays.');
 }
-

@@ -12,7 +12,8 @@ function observedSkill(overrides = {}) {
     skillId: 'observation-1',
     createdAt: '2026-08-13T10:00:00.000Z',
     application: { processName: 'CorelDRW' },
-    executionPolicy: { replayable: false },
+    executionPolicy: { replayable: true },
+    causalReplay: { ready: true },
     semanticExperience: {
       understood: true,
       confidence: 0.72,

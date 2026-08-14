@@ -448,14 +448,14 @@ export async function executeGroundedAction({ action, grounding, execute }) {
     throw error;
   }
   if (['click', 'doubleClick'].includes(action?.type) &&
-      Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD) {
+      Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD && grounding.exploratory !== true) {
     const error = new Error('Grounding confidence is below the execution threshold.');
     error.code = 'grounding_blocked';
     throw error;
   }
   if (action?.type === 'typeText' &&
       ['visual_text_target_refined', 'visual_surface_text_target_refined'].includes(grounding.reason) &&
-      Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD) {
+      Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD && grounding.exploratory !== true) {
     const error = new Error('Visual text-field confidence is below the execution threshold.');
     error.code = 'grounding_blocked';
     throw error;

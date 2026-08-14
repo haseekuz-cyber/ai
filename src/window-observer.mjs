@@ -10,6 +10,24 @@ function positiveInteger(value, fallback) {
   return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
+function normalizedCaptureBounds(value) {
+  if (!value || typeof value !== 'object') return null;
+  const bounds = {
+    x: Math.round(Number(value.x)),
+    y: Math.round(Number(value.y)),
+    width: Math.round(Number(value.width)),
+    height: Math.round(Number(value.height))
+  };
+  return Number.isFinite(bounds.x) && Number.isFinite(bounds.y) &&
+    bounds.width > 0 && bounds.height > 0 ? bounds : null;
+}
+
+function sameCaptureBounds(left, right) {
+  if (!left && !right) return true;
+  return Boolean(left && right && left.x === right.x && left.y === right.y &&
+    left.width === right.width && left.height === right.height);
+}
+
 function cellKey(cell) {
   return `${cell.column}:${cell.row}`;
 }
@@ -113,15 +131,34 @@ export function advanceSettlingTracker(tracker, frame, nowMs = Date.now()) {
 
 export function selectTemporalKeyframePaths(frames = [], { limit = 2 } = {}) {
   const maximum = Math.max(1, Math.min(3, positiveInteger(limit, 2)));
-  const selected = [];
+  const candidates = [];
   const seen = new Set();
-  for (let index = frames.length - 1; index >= 0 && selected.length < maximum; index -= 1) {
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
     const filePath = typeof frames[index]?.keyframePath === 'string' ? frames[index].keyframePath.trim() : '';
     if (!filePath || seen.has(filePath)) continue;
     seen.add(filePath);
-    selected.push(filePath);
+    candidates.push({
+      index,
+      filePath,
+      importance: ['critical', 'high', 'normal', 'low'].includes(frames[index]?.importance)
+        ? frames[index].importance
+        : 'normal'
+    });
   }
-  return selected.reverse();
+  if (candidates.length <= maximum) return candidates.reverse().map((item) => item.filePath);
+
+  // Keep the freshest visual state, then prefer the most important recent
+  // transitions. This avoids spending VLM context on cursor animation while
+  // preserving a frame that explains a modal, large layout change or action.
+  const selected = [candidates[0]];
+  for (const importance of ['critical', 'high', 'normal', 'low']) {
+    for (const candidate of candidates.slice(1)) {
+      if (selected.length >= maximum) break;
+      if (candidate.importance === importance && !selected.includes(candidate)) selected.push(candidate);
+    }
+    if (selected.length >= maximum) break;
+  }
+  return selected.sort((left, right) => left.index - right.index).map((item) => item.filePath);
 }
 
 function publicSnapshot(observer) {
@@ -138,6 +175,7 @@ function publicSnapshot(observer) {
     bounds: frame?.bounds ?? null,
     signature: frame?.signature ?? null,
     changedFraction: frame?.changedFraction ?? 0,
+    importance: frame?.importance ?? null,
     changedRegions: frame ? coalesceChangedCells(frame.changedCells, frame.columns, frame.rows) : [],
     temporalKeyframes: selectTemporalKeyframePaths(observer.keyframes, { limit: 3 }).length,
     framesObserved: observer.framesObserved,
@@ -173,6 +211,7 @@ export class WindowEventObserver extends EventEmitter {
     this.maxBufferedKeyframes = Math.max(3, Math.min(30, positiveInteger(maxBufferedKeyframes, 12)));
     this.child = null;
     this.windowHandle = null;
+    this.captureBounds = null;
     this.latestFrame = null;
     this.frames = [];
     this.keyframes = [];
@@ -199,12 +238,13 @@ export class WindowEventObserver extends EventEmitter {
     return existing;
   }
 
-  async ensure(windowHandle, { readyTimeoutMs = 4_000, mode = 'background' } = {}) {
+  async ensure(windowHandle, { readyTimeoutMs = 4_000, mode = 'background', captureBounds = null } = {}) {
     if (!Number.isInteger(windowHandle) || windowHandle <= 0) throw new TypeError('windowHandle must be a positive integer.');
     if (!['background', 'active'].includes(mode)) throw new TypeError('mode must be background or active.');
     const desiredIntervalMs = mode === 'active' ? this.activeIntervalMs : this.intervalMs;
+    const desiredCaptureBounds = normalizedCaptureBounds(captureBounds);
     if (this.child && this.windowHandle === windowHandle && this.status === 'observing' &&
-        this.currentIntervalMs === desiredIntervalMs) {
+        this.currentIntervalMs === desiredIntervalMs && sameCaptureBounds(this.captureBounds, desiredCaptureBounds)) {
       if (this.latestFrame) return this.snapshot();
       return this.waitForFirstFrame(readyTimeoutMs);
     }
@@ -213,6 +253,7 @@ export class WindowEventObserver extends EventEmitter {
     this.mode = mode;
     this.currentIntervalMs = desiredIntervalMs;
     this.windowHandle = windowHandle;
+    this.captureBounds = desiredCaptureBounds;
     this.latestFrame = null;
     this.frames = [];
     if (!preserveKeyframes) this.keyframes = [];
@@ -232,6 +273,14 @@ export class WindowEventObserver extends EventEmitter {
       '-Rows', String(this.rows)
     ];
     if (this.keyframeDirectory) childArguments.push('-KeyframeDirectory', this.keyframeDirectory);
+    if (this.captureBounds) {
+      childArguments.push(
+        '-CaptureX', String(this.captureBounds.x),
+        '-CaptureY', String(this.captureBounds.y),
+        '-CaptureWidth', String(this.captureBounds.width),
+        '-CaptureHeight', String(this.captureBounds.height)
+      );
+    }
     const child = spawn(powershell, childArguments, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     this.child = child;
     const lines = readline.createInterface({ input: child.stdout });
@@ -277,7 +326,11 @@ export class WindowEventObserver extends EventEmitter {
       this.frames.push(event);
       if (this.frames.length > this.maxBufferedFrames) this.frames.splice(0, this.frames.length - this.maxBufferedFrames);
       if (typeof event.keyframePath === 'string' && event.keyframePath.trim()) {
-        this.keyframes.push({ capturedAt: event.capturedAt, keyframePath: event.keyframePath.trim() });
+        this.keyframes.push({
+          capturedAt: event.capturedAt,
+          keyframePath: event.keyframePath.trim(),
+          importance: event.importance || 'normal'
+        });
         if (this.keyframes.length > this.maxBufferedKeyframes) {
           const removed = this.keyframes.splice(0, this.keyframes.length - this.maxBufferedKeyframes);
           for (const item of removed) void fs.unlink(item.keyframePath).catch(() => {});

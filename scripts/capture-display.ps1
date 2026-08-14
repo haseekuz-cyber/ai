@@ -8,8 +8,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
 
 $matches = @([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -eq $DeviceName })
 if ($matches.Count -ne 1) {
@@ -42,7 +57,7 @@ finally {
 }
 
 $file = Get-Item -LiteralPath $resolvedOutputPath
-$hash = Get-FileHash -LiteralPath $resolvedOutputPath -Algorithm SHA256
+$hash = Get-Sha256Hex -LiteralPath $resolvedOutputPath
 
 [ordered]@{
     schemaVersion = 1
@@ -57,5 +72,5 @@ $hash = Get-FileHash -LiteralPath $resolvedOutputPath -Algorithm SHA256
     }
     outputPath = [string]$file.FullName
     bytes = [long]$file.Length
-    sha256 = [string]$hash.Hash
+    sha256 = [string]$hash
 } | ConvertTo-Json -Depth 4 -Compress
