@@ -9,6 +9,7 @@
     "worker": "node src/worker.mjs",
     "vision:test": "node scripts/check-lmstudio-vision.mjs",
     "gui:benchmark": "node scripts/benchmark-gui-model.mjs",
+    "eval:replay": "node scripts/evaluate-replay.mjs",
     "test": "node --test"
   },
   "engines": {
