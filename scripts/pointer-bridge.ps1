@@ -193,11 +193,31 @@ try {
     [AiPointerBridgeNative+RECT]$windowRect = [AiPointerBridgeNative+RECT]::new()
     if (-not [AiPointerBridgeNative]::GetWindowRect($handle, [ref]$windowRect)) { throw 'Could not read target window bounds.' }
     $hasPoint = $null -ne $request.point
-    $points = if ($request.action -eq 'drag') { @($request.from, $request.to) } elseif ($hasPoint) { @($request.point) } else { @() }
-    foreach ($point in $points) {
-        if (-not (Test-PointInside $point $request.allowedBounds)) { throw 'Pointer point is outside the AI display.' }
+    $pointEntries = @()
+    if ($request.action -eq 'drag') {
+        $pointEntries += [pscustomobject]@{ label = 'from'; point = $request.from }
+        $pointEntries += [pscustomobject]@{ label = 'to'; point = $request.to }
+        if ($null -ne $request.trajectory) {
+            $trajectoryIndex = 0
+            foreach ($trajectoryPoint in @($request.trajectory)) {
+                if ($null -ne $trajectoryPoint) {
+                    $pointEntries += [pscustomobject]@{ label = "trajectory[$trajectoryIndex]"; point = $trajectoryPoint }
+                }
+                $trajectoryIndex++
+            }
+        }
+    }
+    elseif ($hasPoint) {
+        $pointEntries += [pscustomobject]@{ label = 'point'; point = $request.point }
+    }
+    foreach ($entry in $pointEntries) {
+        $point = $entry.point
+        if ($null -eq $point) { throw "PowerShell pointer validation: $($entry.label) is missing." }
+        if (-not (Test-PointInside $point $request.allowedBounds)) {
+            throw "PowerShell pointer validation: $($entry.label) ($($point.x),$($point.y)) is outside the AI display."
+        }
         if ($point.x -lt $windowRect.Left -or $point.x -ge $windowRect.Right -or $point.y -lt $windowRect.Top -or $point.y -ge $windowRect.Bottom) {
-            throw 'Pointer point is outside the target window.'
+            throw "PowerShell pointer validation: $($entry.label) ($($point.x),$($point.y)) is outside the target window."
         }
     }
     if ($request.action -eq 'pressKey' -and -not $hasPoint) {
@@ -252,25 +272,124 @@ try {
             $downMessage = if ($isRight) { 0x0204 } else { 0x0201 }
             $upMessage = if ($isRight) { 0x0205 } else { 0x0202 }
             $buttonState = if ($isRight) { 2 } else { 1 }
-            [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::Zero, (Pack-Point $from))
-            [void][AiPointerBridgeNative]::PostMessage($inputHandle, $downMessage, [UIntPtr]::new($buttonState), (Pack-Point $from))
-            for ($step = 1; $step -le $steps; $step++) {
-                $point = [AiPointerBridgeNative+POINT]::new()
-                $point.X = [int][math]::Round($from.X + (($to.X - $from.X) * $step / $steps))
-                $point.Y = [int][math]::Round($from.Y + (($to.Y - $from.Y) * $step / $steps))
-                [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::new($buttonState), (Pack-Point $point))
-                Start-Sleep -Milliseconds ([math]::Max(1, [math]::Floor([int]$request.durationMs / $steps)))
+
+            $modifierSpecs = @()
+            [uint64]$modifierState = 0
+            if ($null -ne $request.modifiers -and $request.modifiers.Count -gt 0) {
+                foreach ($mod in $request.modifiers) {
+                    switch ([string]$mod) {
+                        'Control' {
+                            $modifierSpecs += [pscustomobject]@{ Key = 0x11; Down = 0x0100; Up = 0x0101; DownParam = 1; UpParam = 0xC0000001 }
+                            $modifierState = $modifierState -bor 0x0008
+                        }
+                        'Shift' {
+                            $modifierSpecs += [pscustomobject]@{ Key = 0x10; Down = 0x0100; Up = 0x0101; DownParam = 1; UpParam = 0xC0000001 }
+                            $modifierState = $modifierState -bor 0x0004
+                        }
+                        'Alt' {
+                            $modifierSpecs += [pscustomobject]@{ Key = 0x12; Down = 0x0104; Up = 0x0105; DownParam = 0x20000001; UpParam = 0xE0000001 }
+                        }
+                        default { throw "Unknown modifier '$mod'. Only Control/Shift/Alt are allowed." }
+                    }
+                }
             }
-            [void][AiPointerBridgeNative]::PostMessage($inputHandle, $upMessage, [UIntPtr]::Zero, (Pack-Point $to))
-            $transport = [ordered]@{ transport = 'window-message'; pattern = 'drag'; element = $null }
+
+            $pressedModifiers = @()
+            $mouseDownSent = $false
+            $lastPoint = $from
+            $pathPoints = @()
+            if ($null -ne $request.trajectory -and $request.trajectory.Count -gt 0) {
+                foreach ($trajectoryPoint in $request.trajectory) {
+                    $pathPoints += Convert-ClientPoint $inputHandle $trajectoryPoint
+                }
+                if ($pathPoints.Count -eq 0 -or $pathPoints[$pathPoints.Count - 1].X -ne $to.X -or $pathPoints[$pathPoints.Count - 1].Y -ne $to.Y) {
+                    $pathPoints += $to
+                }
+            }
+            else {
+                for ($step = 1; $step -le $steps; $step++) {
+                    $point = [AiPointerBridgeNative+POINT]::new()
+                    $point.X = [int][math]::Round($from.X + (($to.X - $from.X) * $step / $steps))
+                    $point.Y = [int][math]::Round($from.Y + (($to.Y - $from.Y) * $step / $steps))
+                    $pathPoints += $point
+                }
+            }
+            try {
+                foreach ($modifier in $modifierSpecs) {
+                    if (-not [AiPointerBridgeNative]::PostMessage(
+                        $inputHandle,
+                        [uint32]$modifier.Down,
+                        [UIntPtr]::new([uint64]$modifier.Key),
+                        [IntPtr]::new([long]$modifier.DownParam)
+                    )) { throw 'Could not send modifier key-down to the selected window.' }
+                    $pressedModifiers += $modifier
+                }
+
+                if (-not [AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::new($modifierState), (Pack-Point $from))) {
+                    throw 'Could not move the window-local pointer to the drag start.'
+                }
+                if (-not [AiPointerBridgeNative]::PostMessage(
+                    $inputHandle,
+                    $downMessage,
+                    [UIntPtr]::new([uint64]($buttonState -bor $modifierState)),
+                    (Pack-Point $from)
+                )) { throw 'Could not send mouse-down for the drag.' }
+                $mouseDownSent = $true
+
+                $pathDelay = [math]::Max(1, [math]::Floor([int]$request.durationMs / [math]::Max(1, $pathPoints.Count)))
+                foreach ($point in $pathPoints) {
+                    if (-not [AiPointerBridgeNative]::PostMessage(
+                        $inputHandle,
+                        0x0200,
+                        [UIntPtr]::new([uint64]($buttonState -bor $modifierState)),
+                        (Pack-Point $point)
+                    )) { throw 'Could not continue the drag trajectory.' }
+                    $lastPoint = $point
+                    Start-Sleep -Milliseconds $pathDelay
+                }
+
+                if (-not [AiPointerBridgeNative]::PostMessage(
+                    $inputHandle,
+                    $upMessage,
+                    [UIntPtr]::new($modifierState),
+                    (Pack-Point $to)
+                )) { throw 'Could not send mouse-up after the drag.' }
+                $mouseDownSent = $false
+                $transport = [ordered]@{ transport = 'window-message'; pattern = 'drag'; element = $null }
+            }
+            finally {
+                if ($mouseDownSent) {
+                    [void][AiPointerBridgeNative]::PostMessage(
+                        $inputHandle,
+                        $upMessage,
+                        [UIntPtr]::new($modifierState),
+                        (Pack-Point $lastPoint)
+                    )
+                }
+                for ($i = $pressedModifiers.Count - 1; $i -ge 0; $i--) {
+                    $modifier = $pressedModifiers[$i]
+                    [void][AiPointerBridgeNative]::PostMessage(
+                        $inputHandle,
+                        [uint32]$modifier.Up,
+                        [UIntPtr]::new([uint64]$modifier.Key),
+                        [IntPtr]::new([long]$modifier.UpParam)
+                    )
+                }
+            }
         }
         'typeText' {
             $transport = Set-AccessibleValue $processId $request.point ([string]$request.text)
             if ($null -eq $transport) {
+                $fieldPoint = Convert-ClientPoint $inputHandle $request.point
+                Send-Click $inputHandle $fieldPoint 'left'
+                Start-Sleep -Milliseconds 80
+                if ([string]$request.textMode -ne 'insert') {
+                    [void](Send-SafeKey $inputHandle 'Ctrl+A')
+                }
                 foreach ($character in ([string]$request.text).ToCharArray()) {
                     [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0102, [UIntPtr]::new([uint64][int]$character), [IntPtr]::Zero)
                 }
-                $transport = [ordered]@{ transport = 'window-message'; pattern = 'char'; element = $null }
+                $transport = [ordered]@{ transport = 'window-message'; pattern = 'focus-selectAll-char'; element = $null }
             }
         }
         'pressKey' {

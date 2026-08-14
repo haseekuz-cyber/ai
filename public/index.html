@@ -3,119 +3,160 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Workstation</title>
+    <title>Рабочее место ИИ</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <header>
-        <p class="eyebrow">INDEPENDENT AI SEAT · PROTOTYPE</p>
-        <h1>AI Workstation</h1>
-        <p class="subtitle">Рабочее место ИИ на втором мониторе без перехвата вашей мыши.</p>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span id="status-dot" class="status-dot pending"></span>
+          <div>
+            <strong>Рабочее место ИИ</strong>
+            <span id="status-text">Подключаю локальную модель…</span>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button id="anarchy-button" class="quiet anarchy" type="button">Анархичность</button>
+          <button id="safety-toggle" class="quiet danger" type="button">Стоп</button>
+          <button id="full-shutdown-button" class="quiet full-shutdown" type="button">Полное отключение</button>
+        </div>
       </header>
 
-      <section class="status-card" aria-live="polite">
+      <section class="composer" aria-labelledby="task-title">
+        <div class="target-row">
+          <label id="task-title" for="window-select">Где работать</label>
+          <select id="window-select" aria-label="Программа для работы">
+            <option value="">Ищу открытые программы…</option>
+          </select>
+        </div>
+        <textarea id="task-input" rows="4" maxlength="4000" placeholder="Напишите, что нужно сделать…"></textarea>
+        <button id="task-button" class="primary" type="button" disabled>Подготовить первый шаг</button>
+        <p id="task-status" class="hint">Выберите программу и опишите результат.</p>
+        <div id="jarvis-activity" class="jarvis-activity" aria-label="Краткие отчёты JARVIS" aria-live="polite" hidden></div>
+      </section>
+
+      <section id="step-card" class="step-card" hidden aria-live="polite">
+        <span id="step-number" class="step-number">Шаг 1</span>
+        <h1 id="step-reason">Следующий шаг</h1>
+        <p id="step-action" class="action-line"></p>
+        <p id="step-result" class="expected"></p>
+        <p id="step-teacher" class="teacher-review"></p>
+        <div class="step-actions">
+          <button id="execute-button" class="primary" type="button">Выполнить этот шаг</button>
+          <button id="teach-step-button" class="quiet" type="button">Передать JARVIS</button>
+        </div>
+      </section>
+
+      <section id="feedback-card" class="feedback-card" hidden aria-live="polite">
         <div>
-          <span class="status-dot pending" id="status-dot"></span>
-          <strong id="status-title">Проверяем Worker…</strong>
-          <p id="status-detail">Подключение к локальному исполнителю.</p>
+          <strong id="feedback-title">Шаг выполнен</strong>
+          <p id="feedback-detail">Если всё правильно, научите модель этим примером.</p>
         </div>
-        <button id="refresh" class="secondary">Обновить</button>
+        <div class="rating-buttons" aria-label="Оцените результат шага">
+          <button id="positive-button" class="rating positive" type="button" aria-label="Результат правильный">👍</button>
+          <button id="negative-button" class="rating negative" type="button" aria-label="Результат неправильный">👎</button>
+        </div>
       </section>
 
-      <section class="status-card safety-card" aria-live="polite">
+      <section id="correction-card" class="correction-card" hidden aria-live="polite">
         <div>
-          <strong id="safety-title">Действия ИИ разрешены</strong>
-          <p id="safety-detail">Кнопка или Ctrl+Shift+F12 блокирует любые новые клики, ввод и шаги навыков.</p>
+          <strong id="correction-title">Исправить именно этот шаг</strong>
+          <p id="correction-detail">Описание необязательно: можно написать короткую подсказку, показать шаг или попросить модель попробовать иначе.</p>
         </div>
-        <div class="safety-controls">
-          <button id="pause-ai" class="danger">СТОП ИИ</button>
-          <button id="resume-ai" class="secondary" disabled>Возобновить</button>
-          <button id="show-audit" class="secondary">Журнал действий</button>
+        <textarea id="correction-input" rows="2" maxlength="1000" placeholder="Например: это холст — здесь нужно тянуть мышь с зажатым Ctrl"></textarea>
+        <div class="correction-actions">
+          <button id="correction-submit" class="primary compact" type="button">Исправить текстом</button>
+          <button id="correction-demo" class="demo-button" type="button">Показать этот шаг</button>
+          <button id="correction-skip" class="quiet" type="button">Попробовать иначе</button>
         </div>
       </section>
 
-      <section class="notice-card">
-        <strong>Безопасный режим MVP</strong>
-        <p>Кнопки, поля и безопасные клавиши адресуются прямо выбранному окну. Физический курсор и системный ввод не используются, а действия ограничены вторым монитором.</p>
-      </section>
-
-      <section class="workspace seat-card">
-        <div class="section-heading">
+      <section id="demo-panel" class="demo-panel" aria-live="polite">
+        <div class="demo-heading">
           <div>
-            <p class="eyebrow">AI DISPLAY</p>
-            <h2>Окна второго экрана</h2>
+            <strong id="demo-title">Модель не поняла?</strong>
+            <span id="demo-status">Покажите выполнение сами — действия станут новым опытом.</span>
           </div>
-          <button id="scan-windows" class="secondary">Найти окна</button>
+          <button id="demo-button" class="demo-button" type="button">Наблюдать и учиться</button>
         </div>
 
-        <div class="window-picker">
-          <select id="window-select" aria-label="Окно второго экрана">
-            <option value="">Сначала нажмите «Найти окна»</option>
-          </select>
-          <button id="inspect-window" disabled>Показать элементы</button>
-          <button id="analyze-window" class="secondary" disabled>Понять изображение</button>
-          <button id="audit-telegram" class="secondary" disabled>Найти непрочитанные</button>
+        <div id="demo-live" class="demo-live" hidden>
+          <div class="trace-wrap">
+            <canvas id="trace-canvas" aria-label="Траектория демонстрации"></canvas>
+            <span id="event-count" class="event-count">0 действий</span>
+          </div>
+          <div id="keys" class="keys" aria-label="Нажатые клавиши">
+            <span class="key-placeholder">Нажатые клавиши появятся здесь</span>
+          </div>
         </div>
-        <p id="display-detail" class="muted">Ожидаем данные о втором мониторе.</p>
-
-        <div id="element-list" class="element-list">
-          <p class="empty-state">Здесь появятся доступные кнопки и поля выбранной программы.</p>
+        <button id="demo-run-button" class="primary demo-run" type="button" hidden>Выполнить с учётом показа</button>
+        <div id="observation-review" class="observation-review" hidden>
+          <div class="observation-actions">
+            <button id="observation-understood-button" class="quiet" type="button">Что ты понял?</button>
+            <button id="observation-repeat-button" class="primary compact" type="button">Повтори понятое</button>
+          </div>
+          <p id="observation-understanding" class="observation-understanding" hidden></p>
         </div>
       </section>
 
-      <section class="workspace">
-        <label for="prompt">Задача для цифрового сотрудника</label>
-        <textarea id="prompt" rows="4" placeholder="Например: проверь непрочитанные чаты и подготовь сводку"></textarea>
-        <div class="agent-controls">
-          <button id="plan-next" disabled>Qwen: начать многошаговую задачу</button>
-          <button id="execute-plan" class="danger" disabled>Подтвердить и выполнить</button>
-          <button id="cancel-mission" class="secondary" disabled>Остановить задачу</button>
+      <section id="teacher-chat" class="teacher-chat" aria-live="polite">
+        <div class="teacher-chat-heading">
+          <div>
+            <strong>JARVIS — программист системы</strong>
+            <span>Опишите изменение или вставьте ссылку на YouTube, урок либо документацию. JARVIS сохранит материал отдельно от принципов.</span>
+          </div>
         </div>
-        <p id="agent-plan-status" class="muted">Выберите окно и опишите задачу. Локальная модель сначала покажет план без выполнения.</p>
-        <div class="teach-controls">
-          <input id="skill-name" type="text" maxlength="128" placeholder="Название навыка (например: подготовить макет к печати)" />
-          <button id="start-teaching" class="secondary" disabled>Начать показ</button>
-          <button id="stop-teaching" disabled>Завершить и сохранить</button>
-          <button id="cancel-teaching" class="secondary" disabled>Отменить запись</button>
+        <div id="teacher-messages" class="teacher-messages"></div>
+        <div class="teacher-chat-input">
+          <textarea id="teacher-message" rows="2" maxlength="4000" placeholder="Опишите изменение или вставьте ссылку на YouTube, урок либо документацию для обучения JARVIS…"></textarea>
+          <div class="teacher-chat-actions">
+            <label class="attachment-button" for="teacher-screenshot">📎 Скриншот</label>
+            <input id="teacher-screenshot" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+            <span id="teacher-attachment" class="attachment-name">Файл не выбран</span>
+            <button id="teacher-send" class="primary compact" type="button">Перепрограммировать</button>
+          </div>
         </div>
-        <p id="teaching-status" class="muted">Во время показа записываются только действия внутри выбранного окна второго монитора.</p>
-        <div class="skill-controls">
-          <select id="skill-select" aria-label="Выученный навык">
-            <option value="">Сохранённых навыков пока нет</option>
-          </select>
-          <button id="refresh-skills" class="secondary">Обновить навыки</button>
-          <button id="recommend-skill" class="secondary" disabled>Подобрать по задаче</button>
-          <button id="prepare-skill" class="secondary" disabled>Подготовить навык</button>
-          <button id="execute-skill-step" disabled>Выполнить следующий шаг</button>
-          <button id="cancel-skill-run" class="secondary" disabled>Остановить навык</button>
-        </div>
-        <p id="skill-status" class="muted">Каждый выученный шаг отдельно показывается и требует подтверждения.</p>
-        <div class="controls">
-          <select id="mode" aria-label="Режим выполнения">
-            <option value="inspect">Только диагностика</option>
-            <option value="dry-run" selected>Подготовить план без действий</option>
-            <option value="execute">Выполнение без подтверждений — запрещено</option>
-          </select>
-          <button id="submit">Передать Worker</button>
-        </div>
-        <p class="muted">Локальная модель анализирует только выбранное окно. Любые действия и отправка сообщений требуют отдельного подтверждения.</p>
+        <article id="teacher-task" class="teacher-task" hidden>
+          <strong>Испытание, подготовленное JARVIS</strong>
+          <p id="teacher-task-text"></p>
+          <p id="teacher-task-criteria"></p>
+          <button id="teacher-task-run" class="primary compact" type="button">Испытать на выбранной программе</button>
+        </article>
+        <article id="teacher-proposal" class="teacher-proposal" hidden>
+          <strong>JARVIS подготовил изменение кода</strong>
+          <p id="teacher-proposal-summary"></p>
+          <ul id="teacher-proposal-files"></ul>
+          <p id="teacher-proposal-tests"></p>
+          <button id="teacher-apply" class="primary compact" type="button">Применить проверенное изменение</button>
+        </article>
       </section>
 
-      <section class="result-card isolation-card">
-        <h2>Независимое рабочее место AI</h2>
-        <div class="session-pair">
-          <span>Windows-сеанс: <strong id="owner-session">—</strong></span>
-          <span>Монитор AI: <strong id="worker-session">—</strong></span>
-          <span>Метод: <strong id="control-method">—</strong></span>
+      <details id="teacher-panel" class="teacher-panel" hidden>
+        <summary>
+          <span><strong>JARVIS</strong><small>проверяет каждый шаг</small></span>
+          <span class="summary-hint">Цели и ценности</span>
+        </summary>
+        <div class="teacher-form">
+          <label for="teacher-name">Имя JARVIS</label>
+          <input id="teacher-name" maxlength="120" />
+          <label for="teacher-mission">Главная цель</label>
+          <textarea id="teacher-mission" rows="3" maxlength="1000"></textarea>
+          <label for="teacher-values">Ценности и правила</label>
+          <textarea id="teacher-values" rows="5" maxlength="2500"></textarea>
+          <button id="teacher-save" class="primary compact" type="button">Сохранить JARVIS</button>
+          <p id="teacher-status" class="principles-help">JARVIS сам проверяет, исследует и исправляет работу агента.</p>
         </div>
-        <ul id="isolation-checks"></ul>
-      </section>
+      </details>
 
-      <section class="result-card">
-        <h2>Журнал</h2>
-        <pre id="result">Приложение запускается…</pre>
-      </section>
+      <details id="principles-panel" class="principles-panel">
+        <summary>
+          <span><strong>Память JARVIS</strong><small id="principles-count">0</small></span>
+          <span class="summary-hint">Основные принципы и обобщённый опыт</span>
+        </summary>
+        <p class="principles-help">Основные принципы защищены. JARVIS отдельно накапливает только переносимые приёмы и ваши общие предпочтения — не текст конкретных заданий.</p>
+        <div id="principles-list" class="principles-list"></div>
+      </details>
     </main>
     <script type="module" src="/app.js"></script>
   </body>

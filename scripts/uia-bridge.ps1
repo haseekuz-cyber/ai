@@ -325,6 +325,26 @@ function Get-WindowList {
     return @($result)
 }
 
+function Get-FocusedTopLevelWindow {
+    param([Parameter(Mandatory)]$Request)
+
+    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    if ($null -eq $focused) { throw 'No focused window is available for passive learning.' }
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $current = $focused
+    while ($null -ne $current) {
+        $parent = $walker.GetParent($current)
+        if ($null -eq $parent -or [System.Windows.Automation.Automation]::Compare($parent, $root)) { break }
+        $current = $parent
+    }
+    if ([int]$current.Current.NativeWindowHandle -le 0) { throw 'The focused application has no recordable top-level window.' }
+    if (-not (Test-BoundsCenter -Rectangle $current.Current.BoundingRectangle -AllowedBounds $Request.allowedBounds)) {
+        throw 'The focused window is outside the observable desktop.'
+    }
+    return $current
+}
+
 function Get-ElementTree {
     param(
         [Parameter(Mandatory)]$Window,
@@ -370,6 +390,11 @@ try {
     switch ([string]$request.operation) {
         'listWindows' {
             $response = [ordered]@{ ok = $true; operation = 'listWindows'; windows = @(Get-WindowList -Request $request) }
+        }
+        'foregroundWindow' {
+            $window = Get-FocusedTopLevelWindow -Request $request
+            Assert-AllowedProcess -Window $window -ForbiddenProcessNames $request.forbiddenProcessNames
+            $response = [ordered]@{ ok = $true; operation = 'foregroundWindow'; window = Convert-Element -Element $window }
         }
         'inspect' {
             $window = Get-WindowElement -Request $request

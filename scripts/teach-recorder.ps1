@@ -12,7 +12,7 @@ if (-not (Test-Path -LiteralPath $outputPath) -or
     (Get-Item -LiteralPath $sourcePath).LastWriteTimeUtc -gt (Get-Item -LiteralPath $outputPath).LastWriteTimeUtc) {
     if (Test-Path -LiteralPath $outputPath) { Remove-Item -LiteralPath $outputPath -Force }
     Add-Type -Path $sourcePath `
-        -ReferencedAssemblies System.Windows.Forms,System.Web.Extensions,UIAutomationClient,UIAutomationTypes,WindowsBase `
+        -ReferencedAssemblies System.Drawing,System.Windows.Forms,System.Web.Extensions,UIAutomationClient,UIAutomationTypes,WindowsBase `
         -OutputAssembly $outputPath `
         -OutputType WindowsApplication
 }

@@ -1,3 +1,5 @@
+import { isSurfaceTextCandidate } from './surface-gesture.mjs';
+
 const MIN_CONFIDENCE_THRESHOLD = 0.6;
 
 function validBounds(bounds) {
@@ -250,6 +252,32 @@ function groundTextInput({ proposal, elements, windowBounds }) {
     };
   }
   if (hits.length > 1) return blockedResult(proposal, 'ambiguous_editable_targets');
+  const targetHint = proposal.action.targetHint || proposal.targetHint;
+  const hasIdentity = targetHint && ['automationId', 'name', 'visibleText']
+    .some((field) => cleanText(targetHint[field]));
+  const inspectedButInaccessible = elements.length > 0 && !elements.some((element) => isEditable(element));
+  if (isSurfaceTextCandidate({ proposal })) {
+    const grounding = {
+      adjusted: false,
+      blocked: false,
+      reason: 'visual_surface_text_refinement_required',
+      targetHint,
+      originalPoint: proposal.action.point,
+      confidence: 0
+    };
+    return { proposal, grounding, blocked: false };
+  }
+  if (editable.length === 0 && inspectedButInaccessible && hasIdentity) {
+    const grounding = {
+      adjusted: false,
+      blocked: false,
+      reason: 'visual_text_refinement_required',
+      targetHint,
+      originalPoint: proposal.action.point,
+      confidence: 0
+    };
+    return { proposal, grounding, blocked: false };
+  }
   if (editable.length !== 1) {
     return blockedResult(proposal, editable.length ? 'ambiguous_editable_targets' : 'no_editable_target');
   }
@@ -346,6 +374,71 @@ export function groundPlannerProposal(options) {
   return { proposal: grounded.proposal, grounding: grounded.grounding };
 }
 
+function samePreparedTarget(prepared, current) {
+  if (!prepared || !current) return false;
+  if (cleanText(prepared.controlType) && cleanText(prepared.controlType) !== cleanText(current.controlType)) return false;
+  if (cleanText(prepared.automationId)) {
+    return String(prepared.automationId).trim() === String(current.automationId || '').trim();
+  }
+  if (cleanText(prepared.name)) return cleanText(prepared.name) === cleanText(current.name);
+  return false;
+}
+
+export function rebindQueuedProposal({ proposal, preparedGrounding, elements = [], windowBounds }) {
+  const actionType = proposal?.action?.type;
+  if (!['click', 'doubleClick', 'typeText'].includes(actionType)) {
+    const error = new Error(`Queued action ${actionType || 'unknown'} requires fresh model planning.`);
+    error.code = 'mini_plan_invalidated';
+    error.reason = 'unsupported_queued_action';
+    throw error;
+  }
+  const targetHint = proposal.action.targetHint || proposal.targetHint;
+  const candidates = elements.filter((element) =>
+    element.enabled !== false && !element.offscreen && validBounds(element.bounds) &&
+    (actionType === 'typeText' ? !element.isPassword && isEditable(element) : isActionable(element))
+  );
+  const scored = candidates.map((element) => ({ element, ...matchTargetHint(element, targetHint) }))
+    .filter((candidate) => candidate.matched && candidate.score >= 0.8);
+  if (scored.length === 0) {
+    const error = new Error('The queued semantic target is no longer visible.');
+    error.code = 'mini_plan_invalidated';
+    error.reason = 'queued_target_missing';
+    throw error;
+  }
+  const bestScore = Math.max(...scored.map((candidate) => candidate.score));
+  const selected = uniqueNestedCandidate(
+    scored.filter((candidate) => candidate.score === bestScore).map((candidate) => candidate.element),
+    elements
+  );
+  if (!selected) {
+    const error = new Error('The queued semantic target became ambiguous.');
+    error.code = 'mini_plan_invalidated';
+    error.reason = 'queued_target_ambiguous';
+    throw error;
+  }
+  if (!samePreparedTarget(preparedGrounding?.target, selected)) {
+    const error = new Error('The queued action now points to a different semantic target.');
+    error.code = 'mini_plan_invalidated';
+    error.reason = 'queued_target_changed';
+    throw error;
+  }
+  const rebound = normalizeAndGround({
+    proposal: {
+      ...proposal,
+      action: { ...proposal.action, point: normalizedCenter(selected.bounds, windowBounds) }
+    },
+    elements,
+    windowBounds
+  });
+  if (rebound.blocked) {
+    const error = new Error(`Queued action could not be rebound: ${rebound.abortReason}`);
+    error.code = 'mini_plan_invalidated';
+    error.reason = rebound.abortReason;
+    throw error;
+  }
+  return { proposal: rebound.proposal, grounding: rebound.grounding };
+}
+
 export async function executeGroundedAction({ action, grounding, execute }) {
   if (typeof execute !== 'function') throw new TypeError('execute must be a function.');
   const requiresGrounding = ['click', 'doubleClick', 'typeText'].includes(action?.type);
@@ -357,6 +450,13 @@ export async function executeGroundedAction({ action, grounding, execute }) {
   if (['click', 'doubleClick'].includes(action?.type) &&
       Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD) {
     const error = new Error('Grounding confidence is below the execution threshold.');
+    error.code = 'grounding_blocked';
+    throw error;
+  }
+  if (action?.type === 'typeText' &&
+      ['visual_text_target_refined', 'visual_surface_text_target_refined'].includes(grounding.reason) &&
+      Number(grounding.confidence) < MIN_CONFIDENCE_THRESHOLD) {
+    const error = new Error('Visual text-field confidence is below the execution threshold.');
     error.code = 'grounding_blocked';
     throw error;
   }

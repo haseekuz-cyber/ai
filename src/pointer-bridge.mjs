@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { normalizeInputModifiers } from './input-modifiers.mjs';
 
 const execFileAsync = promisify(execFile);
 const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -10,6 +11,7 @@ const safeKeys = new Set([
   'Home', 'End', 'PageUp', 'PageDown',
   'Ctrl+Z', 'Ctrl+A'
 ]);
+const displayFrameTolerancePx = 16;
 
 function finiteNumber(value, label) {
   const number = Number(value);
@@ -22,6 +24,13 @@ function normalizePoint(value, label) {
     throw new TypeError(`${label} must be an object.`);
   }
   return { x: finiteNumber(value.x, `${label}.x`), y: finiteNumber(value.y, `${label}.y`) };
+}
+
+function normalizeTrajectory(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new TypeError('trajectory must be an array.');
+  if (value.length > 500) throw new TypeError('trajectory is too long.');
+  return value.map((point, index) => normalizePoint(point, `trajectory[${index}]`));
 }
 
 export function normalizePointerAction(input) {
@@ -40,12 +49,16 @@ export function normalizePointerAction(input) {
     confirmed: true
   };
   if (input.action === 'drag') {
+    const modifiers = normalizeInputModifiers(input.modifiers);
+    const trajectory = normalizeTrajectory(input.trajectory);
     return {
       ...common,
       from: normalizePoint(input.from, 'from'),
       to: normalizePoint(input.to, 'to'),
       durationMs: Math.min(Math.max(finiteNumber(input.durationMs ?? 350, 'durationMs'), 50), 5_000),
-      button: input.button === 'right' ? 'right' : 'left'
+      button: input.button === 'right' ? 'right' : 'left',
+      ...(modifiers.length > 0 ? { modifiers } : {}),
+      ...(trajectory.length > 0 ? { trajectory } : {})
     };
   }
 
@@ -65,22 +78,69 @@ export function normalizePointerAction(input) {
     if (typeof input.text !== 'string' || input.text.length === 0) throw new TypeError('text is required.');
     if (input.text.length > 2_000) throw new TypeError('text is too long.');
     normalized.text = input.text;
+    normalized.textMode = input.textMode === 'insert' ? 'insert' : 'replace';
   } else {
     normalized.button = input.button === 'right' ? 'right' : 'left';
   }
   return normalized;
 }
 
-export function createBoundedPointerRequest({ action, allowedBounds, forbiddenProcessNames }) {
-  if (!allowedBounds || !Number.isFinite(allowedBounds.x) || !Number.isFinite(allowedBounds.y) ||
-      !Number.isFinite(allowedBounds.width) || !Number.isFinite(allowedBounds.height)) {
-    throw new TypeError('allowedBounds are required.');
+function fitPointToAllowedBounds(point, allowedBounds, label = 'point') {
+  const minX = Math.ceil(Number(allowedBounds.x));
+  const minY = Math.ceil(Number(allowedBounds.y));
+  const maxX = Math.floor(Number(allowedBounds.x) + Number(allowedBounds.width) - 1);
+  const maxY = Math.floor(Number(allowedBounds.y) + Number(allowedBounds.height) - 1);
+  const x = Number(point.x);
+  const y = Number(point.y);
+  const outsideBy = Math.max(minX - x, x - maxX, minY - y, y - maxY, 0);
+  if (outsideBy > displayFrameTolerancePx) {
+    const error = new RangeError(`JavaScript pointer validation: ${label} (${x},${y}) is outside the AI display.`);
+    error.code = 'pointer_outside_ai_display';
+    error.details = { stage: 'javascript-boundary-fit', label, point: { x, y }, allowedBounds, outsideBy };
+    throw error;
   }
   return {
-    ...normalizePointerAction(action),
-    allowedBounds,
-    forbiddenProcessNames: [...forbiddenProcessNames]
+    point: {
+      x: Math.min(maxX, Math.max(minX, x)),
+      y: Math.min(maxY, Math.max(minY, y))
+    },
+    adjusted: outsideBy > 0
   };
+}
+
+export function fitPointerActionToAllowedBounds(action, allowedBounds) {
+  const fitted = { ...action };
+  let boundaryAdjusted = false;
+  const fit = (point, label) => {
+    const result = fitPointToAllowedBounds(point, allowedBounds, label);
+    boundaryAdjusted ||= result.adjusted;
+    return result.point;
+  };
+  if (action.action === 'drag') {
+    fitted.from = fit(action.from, 'from');
+    fitted.to = fit(action.to, 'to');
+    if (Array.isArray(action.trajectory)) fitted.trajectory = action.trajectory.map((point, index) => fit(point, `trajectory[${index}]`));
+  } else if (action.point) {
+    fitted.point = fit(action.point, 'point');
+  }
+  return { action: fitted, boundaryAdjusted };
+}
+
+export function createBoundedPointerRequest({ action, allowedBounds, forbiddenProcessNames }) {
+  if (!allowedBounds || !Number.isFinite(allowedBounds.x) || !Number.isFinite(allowedBounds.y) ||
+      !Number.isFinite(allowedBounds.width) || !Number.isFinite(allowedBounds.height) ||
+      allowedBounds.width <= 0 || allowedBounds.height <= 0) {
+    throw new TypeError('allowedBounds are required.');
+  }
+  const normalizedAction = normalizePointerAction(action);
+  const fitted = fitPointerActionToAllowedBounds(normalizedAction, allowedBounds);
+  const normalized = {
+    ...fitted.action,
+    allowedBounds,
+    forbiddenProcessNames: [...forbiddenProcessNames],
+    boundaryAdjusted: fitted.boundaryAdjusted
+  };
+  return normalized;
 }
 
 export async function runPointerAction(scriptPath, request, options = {}) {
@@ -94,6 +154,7 @@ export async function runPointerAction(scriptPath, request, options = {}) {
   if (!result.ok) {
     const error = new Error(result.message || 'Pointer bridge failed.');
     error.code = result.error || 'pointer_bridge_error';
+    error.details = result.details || { stage: 'powershell-pointer-bridge' };
     throw error;
   }
   return result;

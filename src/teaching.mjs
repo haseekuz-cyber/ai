@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { normalizeInputModifiers } from './input-modifiers.mjs';
+import { normalizeTrajectoryMode } from './trajectory.mjs';
 
 const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
@@ -26,6 +28,31 @@ export function normalizePointToWindow(point, bounds) {
   };
 }
 
+export function classifyTrajectoryMode(event, target = null) {
+  const explicit = String(event?.trajectoryMode || '');
+  if (explicit) return normalizeTrajectoryMode(explicit);
+  const controlType = String(event?.controlType || target?.controlType || '').toLocaleLowerCase();
+  if (!target || ['pane', 'canvas', 'document'].includes(controlType)) return 'adaptive';
+  return 'replaceable';
+}
+
+function recordedDragTrajectory(event, recordingEvents, bounds, maxPoints = 500) {
+  const startedAt = Math.max(0, Number(event.atMs) || 0);
+  const endedAt = startedAt + Math.max(0, Number(event.durationMs) || 0);
+  const candidates = [
+    { x: event.x, y: event.y },
+    ...recordingEvents
+      .filter((candidate) => candidate.type === 'pointerMove' && Number(candidate.atMs) >= startedAt && Number(candidate.atMs) <= endedAt)
+      .map((candidate) => ({ x: candidate.x, y: candidate.y })),
+    { x: event.toX, y: event.toY }
+  ].filter((point) => Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)));
+  const stride = Math.max(1, Math.ceil(candidates.length / maxPoints));
+  const normalized = candidates
+    .filter((_, index) => index % stride === 0 || index === candidates.length - 1)
+    .map((point) => normalizePointToWindow(point, bounds));
+  return normalized.filter((point, index) => index === 0 || point.x !== normalized[index - 1].x || point.y !== normalized[index - 1].y);
+}
+
 function contains(bounds, x, y) {
   return bounds && !bounds.empty && bounds.width > 0 && bounds.height > 0 &&
     x >= bounds.x && y >= bounds.y && x < bounds.x + bounds.width && y < bounds.y + bounds.height;
@@ -37,6 +64,18 @@ function stableSelector(element) {
   if (element.name) return { name: element.name, controlType: element.controlType };
   if (element.className) return { className: element.className, controlType: element.controlType };
   return null;
+}
+
+function expectedResultForEvent(event) {
+  const descriptions = {
+    click: 'The demonstrated target should visibly react or change state.',
+    doubleClick: 'The demonstrated target should visibly open or change state.',
+    scroll: 'The demonstrated content should visibly move in the requested direction.',
+    drag: 'The dragged, resized, or drawn content should visibly change along the demonstrated gesture.',
+    typeText: 'The demonstrated field should visibly contain the entered text.',
+    pressKey: 'The demonstrated keyboard command should produce its visible local result.'
+  };
+  return descriptions[event.type] || 'The demonstrated action should produce a visible local result.';
 }
 
 function smallestElementAt(elements, x, y, { includePassword = false } = {}) {
@@ -74,6 +113,9 @@ export function pointerActionToTeachingEvent({ action, elements = [], atMs = 0 }
     event.toY = Number(action.to?.y);
     event.durationMs = action.durationMs;
     event.button = action.button === 'right' ? 'right' : 'left';
+    const modifiers = normalizeInputModifiers(action.modifiers);
+    if (modifiers.length > 0) event.modifiers = modifiers;
+    event.trajectoryMode = classifyTrajectoryMode(action, target);
   }
   if (action.action === 'pressKey') event.key = action.key;
   if (action.action === 'typeText') {
@@ -83,13 +125,28 @@ export function pointerActionToTeachingEvent({ action, elements = [], atMs = 0 }
   return event;
 }
 
-function collapseRecordedEvents(events) {
+export function collapseRecordedEvents(events) {
   const collapsed = [];
-  for (const event of [...events].sort((left, right) => Number(left.atMs) - Number(right.atMs))) {
+  const ordered = [...events].sort((left, right) => Number(left.atMs) - Number(right.atMs));
+  const keyboardEvents = ordered.filter((event) => ['pressKey', 'keyPreview'].includes(event.type));
+  const logicalEvents = ordered.filter((event) => {
+    if (['pointerMove', 'keyPreview'].includes(event.type)) return false;
+    if (event.type !== 'typeText' || event.source !== 'uia-event') return true;
+    return keyboardEvents.some((keyEvent) => {
+      const elapsed = Number(event.atMs) - Number(keyEvent.atMs);
+      if (elapsed < 0 || elapsed > 1500) return false;
+      if (event.automationId && keyEvent.automationId) return event.automationId === keyEvent.automationId;
+      return true;
+    });
+  });
+  for (const event of logicalEvents) {
     const previous = collapsed.at(-1);
     if (event.type === 'typeText' && previous?.type === 'typeText' &&
-        previous.automationId === event.automationId && previous.name === event.name) {
-      collapsed[collapsed.length - 1] = event;
+        ((event.automationId && previous.automationId && previous.automationId === event.automationId) ||
+         (!event.automationId && !previous.automationId && previous.name === event.name))) {
+      collapsed[collapsed.length - 1] = event.source === 'keyboard-hook' && previous.source === 'keyboard-hook'
+        ? { ...event, atMs: previous.atMs, text: `${previous.text ?? ''}${event.text ?? ''}` }
+        : event;
       continue;
     }
     if (event.type === 'click' && previous?.type === 'click' && event.button === previous.button &&
@@ -108,10 +165,70 @@ function collapseRecordedEvents(events) {
   return collapsed;
 }
 
+function normalizedVisualFrame(frame) {
+  if (!frame || typeof frame.imagePath !== 'string' || !frame.imagePath.trim()) return null;
+  return {
+    imagePath: frame.imagePath,
+    sha256: typeof frame.sha256 === 'string' ? frame.sha256 : null,
+    capturedAt: typeof frame.capturedAt === 'string' ? frame.capturedAt : null,
+    atMs: Number.isFinite(Number(frame.atMs)) ? Math.max(0, Math.round(Number(frame.atMs))) : null,
+    throughSequence: Number.isFinite(Number(frame.throughSequence)) ? Number(frame.throughSequence) : null
+  };
+}
+
+function visualFrameAfterEvent(event, frames) {
+  const sequence = Number(event?.sequence);
+  if (Number.isFinite(sequence) && sequence > 0) {
+    const bySequence = frames.find((frame) => Number(frame?.throughSequence) >= sequence);
+    if (bySequence) return normalizedVisualFrame(bySequence);
+  }
+  const eventEndedAt = Number(event?.atMs || 0) + (event?.type === 'drag' ? Number(event?.durationMs || 0) : 0);
+  return normalizedVisualFrame(frames.find((frame) => Number(frame?.atMs) >= eventEndedAt));
+}
+
+export function summarizeDemonstration(recording, bounds, maxTrajectoryPoints = 500) {
+  const pointerEvents = (recording?.events ?? []).filter((event) =>
+    ['pointerMove', 'click', 'doubleClick', 'drag', 'scroll'].includes(event.type) &&
+    Number.isFinite(Number(event.x)) && Number.isFinite(Number(event.y))
+  );
+  const stride = Math.max(1, Math.ceil(pointerEvents.length / maxTrajectoryPoints));
+  const trajectory = pointerEvents
+    .filter((_, index) => index % stride === 0 || index === pointerEvents.length - 1)
+    .map((event) => ({
+      type: event.type,
+      atMs: Math.max(0, Math.round(Number(event.atMs) || 0)),
+      point: normalizePointToWindow({ x: event.x, y: event.y }, bounds),
+      ...(event.type === 'drag' ? {
+        to: normalizePointToWindow({ x: event.toX, y: event.toY }, bounds),
+        modifiers: normalizeInputModifiers(event.modifiers),
+        trajectoryMode: classifyTrajectoryMode(event)
+      } : {})
+    }));
+  const keyboard = (recording?.events ?? [])
+    .filter((event) => ['pressKey', 'keyPreview'].includes(event.type) && !event.sensitive && event.key)
+    .slice(-300)
+    .map((event) => ({
+      type: event.type,
+      atMs: Math.max(0, Math.round(Number(event.atMs) || 0)),
+      key: String(event.key).slice(0, 40)
+    }));
+  return {
+    eventCount: recording?.events?.length ?? 0,
+    trajectory,
+    keyboard,
+    interpretationRule: 'The trajectory is evidence of intent. Adapt it to the current layout and use a shorter safe method when the exact path is not essential.'
+  };
+}
+
 export function buildSkillFromRecording({ skillId, name, instruction, window, recording, elements = [] }) {
   const warnings = [...(recording?.warnings ?? [])];
   const steps = [];
-  for (const event of collapseRecordedEvents(recording?.events ?? [])) {
+  const logicalEvents = collapseRecordedEvents(recording?.events ?? []);
+  const visualFrames = Array.isArray(recording?.visualFrames)
+    ? [...recording.visualFrames].sort((left, right) => Number(left.atMs) - Number(right.atMs))
+    : [];
+  let previousVisualFrame = normalizedVisualFrame(recording?.initialVisualFrame);
+  for (const event of logicalEvents) {
     if (event.sensitive) {
       warnings.push('A password-field change was redacted and not added to the skill.');
       continue;
@@ -125,6 +242,7 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       type: event.type,
       atMs: Math.max(0, Math.round(Number(event.atMs) || 0)),
       target: stableSelector(event) || stableSelector(target),
+      expectedResult: expectedResultForEvent(event),
       requiresConfirmation: true
     };
     if (['click', 'doubleClick', 'scroll', 'typeText', 'pressKey'].includes(event.type) &&
@@ -138,6 +256,10 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       step.to = normalizePointToWindow({ x: event.toX, y: event.toY }, window.bounds);
       step.durationMs = Math.min(Math.max(Math.round(Number(event.durationMs) || 350), 50), 5_000);
       step.button = event.button === 'right' ? 'right' : 'left';
+      const modifiers = normalizeInputModifiers(event.modifiers, { label: 'recording event modifiers' });
+      if (modifiers.length > 0) step.modifiers = modifiers;
+      step.trajectoryMode = classifyTrajectoryMode(event, target);
+      step.trajectory = recordedDragTrajectory(event, recording?.events ?? [], window.bounds);
     }
     if (event.type === 'typeText') {
       if (typeof event.text !== 'string') {
@@ -147,6 +269,22 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       step.text = event.text;
     }
     if (event.type === 'pressKey') step.key = String(event.key || '');
+    let afterVisualFrame = visualFrameAfterEvent(event, visualFrames);
+    if (!afterVisualFrame && event === logicalEvents.at(-1)) {
+      afterVisualFrame = normalizedVisualFrame(recording?.finalVisualFrame);
+    }
+    if (previousVisualFrame && afterVisualFrame) {
+      step.visualEvidence = {
+        schemaVersion: 1,
+        beforeImagePath: previousVisualFrame.imagePath,
+        afterImagePath: afterVisualFrame.imagePath,
+        beforeSha256: previousVisualFrame.sha256,
+        afterSha256: afterVisualFrame.sha256,
+        capturedAtMs: afterVisualFrame.atMs,
+        source: 'live-demonstration'
+      };
+    }
+    if (afterVisualFrame) previousVisualFrame = afterVisualFrame;
     steps.push(step);
   }
   if (steps.length === 0) throw new Error('No reusable actions were recorded inside the selected window.');
@@ -168,6 +306,7 @@ export function buildSkillFromRecording({ skillId, name, instruction, window, re
       defaultRequiresConfirmation: true,
       passwordValuesStored: false
     },
+    demonstration: summarizeDemonstration(recording, window.bounds),
     steps,
     warnings: [...new Set(warnings)]
   };

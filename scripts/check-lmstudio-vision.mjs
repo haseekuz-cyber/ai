@@ -20,4 +20,3 @@ const result = await analyzeImageWithLmStudio({
   prompt
 });
 console.log(JSON.stringify(result, null, 2));
-

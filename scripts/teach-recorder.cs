@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -18,6 +20,7 @@ public static class AIWorkstationTeachRecorder
     private const int WM_RBUTTONDOWN = 0x0204;
     private const int WM_RBUTTONUP = 0x0205;
     private const int WM_MOUSEWHEEL = 0x020A;
+    private const int WM_MOUSEMOVE = 0x0200;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_SYSKEYDOWN = 0x0104;
     private const uint GA_ROOT = 2;
@@ -32,8 +35,10 @@ public static class AIWorkstationTeachRecorder
         public long targetWindowHandle;
         public BoundsConfig allowedBounds;
         public string outputPath;
+        public string livePath;
         public string readyPath;
         public string stopPath;
+        public string evidenceDirectory;
         public int maxDurationMs;
     }
     public sealed class RecordedEvent
@@ -54,6 +59,15 @@ public static class AIWorkstationTeachRecorder
         public string controlType;
         public bool sensitive;
         public string source;
+        public string[] modifiers;
+        public long sequence;
+    }
+    public sealed class RecordedFrame
+    {
+        public long throughSequence;
+        public int logicalEventCount;
+        public long atMs;
+        public string imagePath;
     }
     public sealed class RecorderOutput
     {
@@ -62,10 +76,12 @@ public static class AIWorkstationTeachRecorder
         public string stoppedAt;
         public long targetWindowHandle;
         public List<RecordedEvent> events;
+        public List<RecordedFrame> visualFrames;
         public List<string> warnings;
+        public string stopReason;
     }
 
-    private sealed class PendingPointer { public POINT Point; public long AtMs; public string Button; }
+    private sealed class PendingPointer { public POINT Point; public long AtMs; public string Button; public string[] Modifiers; }
     private sealed class RecordingContext : ApplicationContext
     {
         public readonly System.Windows.Forms.Timer Timer;
@@ -81,6 +97,7 @@ public static class AIWorkstationTeachRecorder
     private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
     private static readonly object Sync = new object();
     private static readonly List<RecordedEvent> Events = new List<RecordedEvent>();
+    private static readonly List<RecordedFrame> VisualFrames = new List<RecordedFrame>();
     private static readonly List<string> Warnings = new List<string>();
     private static readonly Stopwatch Clock = new Stopwatch();
     private static HookProc mouseProc;
@@ -97,6 +114,19 @@ public static class AIWorkstationTeachRecorder
     private static AutomationPropertyChangedEventHandler valueChangedHandler;
     private static AutomationEventHandler invokedHandler;
     private static bool stopping;
+    private static bool hasLastMove;
+    private static POINT lastMove;
+    private static long lastMoveAtMs;
+    private static int lastLiveEventCount = -1;
+    private static long lastKeyboardAtMs = -10000;
+    private static bool hasLastPointerInteraction;
+    private static POINT lastPointerInteraction;
+    private static long lastPointerInteractionAtMs;
+    private static long nextSequence;
+    private static long lastCapturedSequence;
+    private static bool evidenceWarningWritten;
+    private static volatile bool hotkeyStopRequested;
+    private static string stopReason = "controller";
 
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetWindowsHookEx(int idHook, HookProc callback, IntPtr module, uint threadId);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UnhookWindowsHookEx(IntPtr hook);
@@ -105,6 +135,14 @@ public static class AIWorkstationTeachRecorder
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool GetKeyboardState(byte[] keyState);
+    [DllImport("user32.dll")] private static extern IntPtr GetKeyboardLayout(uint threadId);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int ToUnicodeEx(
+        uint virtualKey, uint scanCode, byte[] keyState, StringBuilder buffer,
+        int bufferCapacity, uint flags, IntPtr keyboardLayout);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
     [STAThread]
     public static int Main(string[] args)
@@ -126,6 +164,7 @@ public static class AIWorkstationTeachRecorder
             if (mouseHook == IntPtr.Zero || keyboardHook == IntPtr.Zero) throw new InvalidOperationException("Could not install teaching hooks.");
             TrySubscribeValueChanges();
             Directory.CreateDirectory(Path.GetDirectoryName(config.outputPath));
+            WriteSnapshot(config.livePath, false);
             File.WriteAllText(config.readyPath, DateTime.UtcNow.ToString("o"), new UTF8Encoding(false));
             context = new RecordingContext();
             Application.Run(context);
@@ -179,12 +218,18 @@ public static class AIWorkstationTeachRecorder
         {
             AutomationElement element = sender as AutomationElement;
             if (element == null || element.Current.ProcessId != targetAutomation.Current.ProcessId) return;
+            long now = Clock.ElapsedMilliseconds;
+            if (now - lastKeyboardAtMs > 1500) return;
+            AutomationElement focused = AutomationElement.FocusedElement;
+            if (focused == null || !Automation.Compare(element, focused)) return;
+            ControlType controlType = element.Current.ControlType;
+            if (controlType != ControlType.Edit && controlType != ControlType.Document && controlType != ControlType.ComboBox) return;
             System.Windows.Rect bounds = element.Current.BoundingRectangle;
             if (bounds.IsEmpty) return;
             bool sensitive = element.Current.IsPassword;
             RecordedEvent item = new RecordedEvent {
                 type = "typeText",
-                atMs = Clock.ElapsedMilliseconds,
+                atMs = now,
                 x = (int)Math.Round(bounds.X + bounds.Width / 2),
                 y = (int)Math.Round(bounds.Y + bounds.Height / 2),
                 text = sensitive ? null : Convert.ToString(args.NewValue),
@@ -196,6 +241,7 @@ public static class AIWorkstationTeachRecorder
             };
             lock (Sync)
             {
+                item.sequence = ++nextSequence;
                 if (Events.Count > 0 && Events[Events.Count - 1].type == "typeText" &&
                     Events[Events.Count - 1].automationId == item.automationId &&
                     Events[Events.Count - 1].name == item.name)
@@ -239,8 +285,9 @@ public static class AIWorkstationTeachRecorder
         {
             MSLLHOOKSTRUCT data = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
             int message = wParam.ToInt32();
-            if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt)) leftDown = NewPending(data.pt, "left");
-            else if (message == WM_RBUTTONDOWN && PointBelongsToTarget(data.pt)) rightDown = NewPending(data.pt, "right");
+            if (message == WM_MOUSEMOVE && PointBelongsToTarget(data.pt)) RecordPointerMove(data.pt);
+            else if (message == WM_LBUTTONDOWN && PointBelongsToTarget(data.pt)) leftDown = NewPending(data.pt, "left", GetActiveModifiers());
+            else if (message == WM_RBUTTONDOWN && PointBelongsToTarget(data.pt)) rightDown = NewPending(data.pt, "right", GetActiveModifiers());
             else if (message == WM_LBUTTONUP) CompletePointer(leftDown, data.pt);
             else if (message == WM_RBUTTONUP) CompletePointer(rightDown, data.pt);
             else if (message == WM_MOUSEWHEEL && PointBelongsToTarget(data.pt))
@@ -254,6 +301,16 @@ public static class AIWorkstationTeachRecorder
         return CallNextHookEx(mouseHook, nCode, wParam, lParam);
     }
 
+    private static string[] GetActiveModifiers()
+    {
+        Keys modifiers = Control.ModifierKeys;
+        var list = new System.Collections.Generic.List<string>();
+        if ((modifiers & Keys.Control) == Keys.Control) list.Add("Control");
+        if ((modifiers & Keys.Shift) == Keys.Shift) list.Add("Shift");
+        if ((modifiers & Keys.Alt) == Keys.Alt) list.Add("Alt");
+        return list.ToArray();
+    }
+
     private static IntPtr KeyboardHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0 && !stopping && (wParam.ToInt32() == WM_KEYDOWN || wParam.ToInt32() == WM_SYSKEYDOWN) &&
@@ -261,10 +318,25 @@ public static class AIWorkstationTeachRecorder
         {
             KBDLLHOOKSTRUCT data = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
             Keys key = (Keys)data.vkCode;
-            string safeKey = SafeRecordedKey(key);
-            if (safeKey != null)
+            Keys activeModifiers = Control.ModifierKeys;
+            if (key == Keys.F10 && (activeModifiers & Keys.Control) == Keys.Control && (activeModifiers & Keys.Alt) == Keys.Alt)
             {
-                RecordedEvent item = new RecordedEvent { type = "pressKey", atMs = Clock.ElapsedMilliseconds, key = safeKey, source = "keyboard-hook" };
+                hotkeyStopRequested = true;
+                return new IntPtr(1);
+            }
+            string safeKey = SafeRecordedKey(key);
+            string previewKey = SafePreviewKey(key);
+            string typedText = safeKey == null ? TranslateKeyToText(data) : null;
+            if (safeKey != null || previewKey != null || typedText != null)
+            {
+                lastKeyboardAtMs = Clock.ElapsedMilliseconds;
+                RecordedEvent item = new RecordedEvent {
+                    type = safeKey != null ? "pressKey" : (typedText != null ? "typeText" : "keyPreview"),
+                    atMs = Clock.ElapsedMilliseconds,
+                    key = safeKey ?? previewKey,
+                    text = typedText,
+                    source = "keyboard-hook"
+                };
                 try
                 {
                     AutomationElement focused = AutomationElement.FocusedElement;
@@ -280,10 +352,39 @@ public static class AIWorkstationTeachRecorder
                     }
                 }
                 catch { }
-                AddEvent(item);
+                if (item.type == "typeText" && hasLastPointerInteraction &&
+                    item.atMs - lastPointerInteractionAtMs <= 15000 &&
+                    item.controlType != "Edit" && item.controlType != "Document" && item.controlType != "ComboBox")
+                {
+                    item.x = lastPointerInteraction.X;
+                    item.y = lastPointerInteraction.Y;
+                }
+                if (!item.sensitive || safeKey != null) AddEvent(item);
             }
         }
         return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+    }
+
+    private static string TranslateKeyToText(KBDLLHOOKSTRUCT data)
+    {
+        try
+        {
+            Keys modifiers = Control.ModifierKeys;
+            bool control = (modifiers & Keys.Control) == Keys.Control;
+            bool alt = (modifiers & Keys.Alt) == Keys.Alt;
+            // Plain Ctrl or Alt is a shortcut. Ctrl+Alt may be AltGr and can produce text.
+            if (control != alt) return null;
+            byte[] state = new byte[256];
+            if (!GetKeyboardState(state)) return null;
+            uint processId;
+            uint threadId = GetWindowThreadProcessId(GetForegroundWindow(), out processId);
+            StringBuilder buffer = new StringBuilder(8);
+            int count = ToUnicodeEx(data.vkCode, data.scanCode, state, buffer, buffer.Capacity, 0, GetKeyboardLayout(threadId));
+            if (count <= 0) return null;
+            string value = buffer.ToString(0, Math.Min(count, buffer.Length));
+            return String.IsNullOrEmpty(value) || Char.IsControl(value[0]) ? null : value;
+        }
+        catch { return null; }
     }
 
     private static string SafeNonTextKey(Keys key)
@@ -322,14 +423,43 @@ public static class AIWorkstationTeachRecorder
         return null;
     }
 
-    private static PendingPointer NewPending(POINT point, string button)
+    private static string SafePreviewKey(Keys key)
     {
-        return new PendingPointer { Point = point, AtMs = Clock.ElapsedMilliseconds, Button = button };
+        Keys modifiers = Control.ModifierKeys;
+        if ((modifiers & Keys.Control) == Keys.Control && key >= Keys.A && key <= Keys.Z) return "Ctrl+" + key.ToString();
+        if ((modifiers & Keys.Alt) == Keys.Alt && key >= Keys.A && key <= Keys.Z) return "Alt+" + key.ToString();
+        if ((modifiers & Keys.Shift) == Keys.Shift && key >= Keys.A && key <= Keys.Z) return "Shift+" + key.ToString();
+        if (key >= Keys.A && key <= Keys.Z) return key.ToString();
+        if (key >= Keys.D0 && key <= Keys.D9) return key.ToString().Substring(1);
+        if (key >= Keys.NumPad0 && key <= Keys.NumPad9) return "Num" + ((int)key - (int)Keys.NumPad0).ToString();
+        if (key == Keys.Space) return "Space";
+        return SafeNonTextKey(key);
+    }
+
+    private static void RecordPointerMove(POINT point)
+    {
+        long now = Clock.ElapsedMilliseconds;
+        int dx = hasLastMove ? point.X - lastMove.X : 100;
+        int dy = hasLastMove ? point.Y - lastMove.Y : 100;
+        if (hasLastMove && now - lastMoveAtMs < 40) return;
+        if (hasLastMove && dx * dx + dy * dy < 9) return;
+        hasLastMove = true;
+        lastMove = point;
+        lastMoveAtMs = now;
+        AddEvent(new RecordedEvent { type = "pointerMove", atMs = now, x = point.X, y = point.Y, source = "pointer-hook" });
+    }
+
+    private static PendingPointer NewPending(POINT point, string button, string[] modifiers)
+    {
+        return new PendingPointer { Point = point, AtMs = Clock.ElapsedMilliseconds, Button = button, Modifiers = modifiers };
     }
 
     private static void CompletePointer(PendingPointer pending, POINT end)
     {
         if (pending == null || !PointBelongsToTarget(end)) return;
+        hasLastPointerInteraction = true;
+        lastPointerInteraction = end;
+        lastPointerInteractionAtMs = Clock.ElapsedMilliseconds;
         int dx = end.X - pending.Point.X;
         int dy = end.Y - pending.Point.Y;
         int duration = (int)Math.Min(Int32.MaxValue, Clock.ElapsedMilliseconds - pending.AtMs);
@@ -342,8 +472,9 @@ public static class AIWorkstationTeachRecorder
             toX = end.X,
             toY = end.Y,
             durationMs = duration,
-            button = pending.Button
-            ,source = "pointer-hook"
+            button = pending.Button,
+            modifiers = drag && pending.Modifiers != null && pending.Modifiers.Length > 0 ? pending.Modifiers : null,
+            source = "pointer-hook"
         });
     }
 
@@ -357,30 +488,144 @@ public static class AIWorkstationTeachRecorder
 
     private static void AddEvent(RecordedEvent item)
     {
-        lock (Sync) Events.Add(item);
+        lock (Sync)
+        {
+            if (item != null && item.type == "typeText" && item.source == "keyboard-hook" &&
+                !String.IsNullOrEmpty(item.text))
+            {
+                for (int index = Events.Count - 1; index >= 0; index--)
+                {
+                    RecordedEvent previous = Events[index];
+                    if (previous.type == "pointerMove" || previous.type == "keyPreview") continue;
+                    if (previous.type == "typeText" && previous.source == "keyboard-hook" &&
+                        previous.automationId == item.automationId && previous.name == item.name &&
+                        item.atMs - previous.atMs <= 1500)
+                    {
+                        previous.text = (previous.text ?? String.Empty) + item.text;
+                        previous.atMs = item.atMs;
+                        previous.sequence = ++nextSequence;
+                        return;
+                    }
+                    break;
+                }
+            }
+            item.sequence = ++nextSequence;
+            Events.Add(item);
+        }
+    }
+
+    private static bool IsLogicalEvidenceEvent(RecordedEvent item)
+    {
+        return item != null && item.type != "pointerMove" && item.type != "keyPreview";
+    }
+
+    private static void CaptureVisualEvidence(bool force)
+    {
+        if (String.IsNullOrEmpty(config.evidenceDirectory)) return;
+        long throughSequence = 0;
+        long latestAtMs = 0;
+        int logicalCount = 0;
+        lock (Sync)
+        {
+            foreach (RecordedEvent item in Events)
+            {
+                if (!IsLogicalEvidenceEvent(item)) continue;
+                logicalCount++;
+                if (item.sequence > throughSequence) throughSequence = item.sequence;
+                if (item.atMs > latestAtMs) latestAtMs = item.atMs;
+            }
+        }
+        if (!force && throughSequence <= lastCapturedSequence) return;
+        if (!force && Clock.ElapsedMilliseconds - latestAtMs < 120) return;
+        try
+        {
+            RECT rect;
+            if (!GetWindowRect(targetHandle, out rect)) throw new InvalidOperationException("Could not read target window bounds.");
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+            if (width <= 0 || height <= 0) throw new InvalidOperationException("Target window bounds are empty.");
+            Directory.CreateDirectory(config.evidenceDirectory);
+            string imagePath = Path.Combine(config.evidenceDirectory, String.Format("step-frame-{0:D6}-{1:D6}.png", throughSequence, Clock.ElapsedMilliseconds));
+            using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+                bitmap.Save(imagePath, ImageFormat.Png);
+            }
+            lock (Sync)
+            {
+                if (VisualFrames.Count >= 256)
+                {
+                    // Keep the early context and a sliding recent history. The
+                    // previous implementation stopped capturing forever at
+                    // frame 256, so a long demonstration had no final result.
+                    RecordedFrame replaced = VisualFrames[128];
+                    VisualFrames.RemoveAt(128);
+                    try { if (File.Exists(replaced.imagePath)) File.Delete(replaced.imagePath); } catch { }
+                }
+                VisualFrames.Add(new RecordedFrame {
+                    throughSequence = throughSequence,
+                    logicalEventCount = logicalCount,
+                    atMs = Clock.ElapsedMilliseconds,
+                    imagePath = imagePath
+                });
+            }
+            lastCapturedSequence = throughSequence;
+        }
+        catch (Exception error)
+        {
+            if (!evidenceWarningWritten)
+            {
+                lock (Sync) Warnings.Add("Per-step visual evidence unavailable: " + error.Message);
+                evidenceWarningWritten = true;
+            }
+        }
     }
 
     private static void CheckStop()
     {
         if (stopping) return;
-        if (File.Exists(config.stopPath) || Clock.ElapsedMilliseconds >= Math.Max(1000, config.maxDurationMs)) Stop();
+        CaptureVisualEvidence(false);
+        WriteLiveSnapshot();
+        if (hotkeyStopRequested) Stop("hotkey");
+        else if (File.Exists(config.stopPath)) Stop("controller");
+        else if (Clock.ElapsedMilliseconds >= Math.Max(1000, config.maxDurationMs)) Stop("timeout");
     }
 
-    private static void Stop()
+    private static void WriteLiveSnapshot()
     {
-        stopping = true;
+        int count;
+        lock (Sync) count = Events.Count;
+        if (count == lastLiveEventCount) return;
+        WriteSnapshot(config.livePath, false);
+        lastLiveEventCount = count;
+    }
+
+    private static void WriteSnapshot(string outputPath, bool stopped)
+    {
+        if (String.IsNullOrEmpty(outputPath)) return;
         RecorderOutput output = new RecorderOutput {
             startedAt = startedAt,
-            stoppedAt = DateTime.UtcNow.ToString("o"),
+            stoppedAt = stopped ? DateTime.UtcNow.ToString("o") : null,
             targetWindowHandle = config.targetWindowHandle
+            ,stopReason = stopped ? stopReason : null
         };
         lock (Sync)
         {
             output.events = new List<RecordedEvent>(Events);
             output.events.Sort(delegate(RecordedEvent a, RecordedEvent b) { return a.atMs.CompareTo(b.atMs); });
+            output.visualFrames = new List<RecordedFrame>(VisualFrames);
             output.warnings = new List<string>(Warnings);
         }
-        File.WriteAllText(config.outputPath, new JavaScriptSerializer().Serialize(output), new UTF8Encoding(false));
+        File.WriteAllText(outputPath, new JavaScriptSerializer().Serialize(output), new UTF8Encoding(false));
+    }
+
+    private static void Stop(string reason)
+    {
+        stopping = true;
+        stopReason = String.IsNullOrEmpty(reason) ? "controller" : reason;
+        CaptureVisualEvidence(true);
+        WriteSnapshot(config.outputPath, true);
         context.ExitThread();
     }
 

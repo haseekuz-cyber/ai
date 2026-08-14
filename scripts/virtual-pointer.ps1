@@ -18,6 +18,8 @@ using System.Windows.Forms;
 public sealed class AiPointerForm : Form
 {
     public string PointerLabel { get; set; }
+    public string MessageText { get; set; }
+    public string Tone { get; set; }
 
     public AiPointerForm()
     {
@@ -27,9 +29,11 @@ public sealed class AiPointerForm : Form
         StartPosition = FormStartPosition.Manual;
         BackColor = Color.Magenta;
         TransparencyKey = Color.Magenta;
-        ClientSize = new Size(76, 48);
+        ClientSize = new Size(460, 160);
         DoubleBuffered = true;
         PointerLabel = "AI";
+        MessageText = "";
+        Tone = "working";
     }
 
     protected override bool ShowWithoutActivation
@@ -65,12 +69,38 @@ public sealed class AiPointerForm : Form
         using (SolidBrush badge = new SolidBrush(Color.FromArgb(24, 25, 35)))
         using (SolidBrush text = new SolidBrush(Color.White))
         using (Font font = new Font("Segoe UI", 9f, FontStyle.Bold))
+        using (Font messageFont = new Font("Segoe UI", 9f, FontStyle.Regular))
         {
             path.AddPolygon(cursor);
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(outline, path);
             e.Graphics.FillRoundedRectangle(badge, new Rectangle(30, 9, 42, 24), 8);
             e.Graphics.DrawString(PointerLabel, font, text, new PointF(37, 12));
+            if (!String.IsNullOrWhiteSpace(MessageText))
+            {
+                Color toneColor = Tone == "success" ? Color.FromArgb(53, 187, 125)
+                    : Tone == "error" ? Color.FromArgb(225, 83, 102)
+                    : Tone == "warning" ? Color.FromArgb(225, 168, 65)
+                    : Color.FromArgb(118, 99, 255);
+                using (SolidBrush bubble = new SolidBrush(Color.FromArgb(238, 20, 23, 31)))
+                using (Pen border = new Pen(toneColor, 1.5f))
+                using (SolidBrush dot = new SolidBrush(toneColor))
+                {
+                    SizeF measured = e.Graphics.MeasureString(MessageText, messageFont, 376);
+                    int messageHeight = Math.Min(90, Math.Max(36, (int)Math.Ceiling(measured.Height) + 4));
+                    Rectangle bubbleBounds = new Rectangle(30, 42, 422, messageHeight + 18);
+                    e.Graphics.FillRoundedRectangle(bubble, bubbleBounds, 10);
+                    e.Graphics.DrawRoundedRectangle(border, bubbleBounds, 10);
+                    e.Graphics.FillEllipse(dot, 42, 54, 8, 8);
+                    RectangleF messageBounds = new RectangleF(58, 50, 376, messageHeight);
+                    using (StringFormat format = new StringFormat())
+                    {
+                        format.Trimming = StringTrimming.EllipsisWord;
+                        format.FormatFlags = StringFormatFlags.LineLimit;
+                        e.Graphics.DrawString(MessageText, messageFont, text, messageBounds, format);
+                    }
+                }
+            }
         }
     }
 }
@@ -88,6 +118,20 @@ public static class GraphicsExtensions
             path.AddArc(bounds.X, bounds.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             graphics.FillPath(brush, path);
+        }
+    }
+
+    public static void DrawRoundedRectangle(this Graphics graphics, Pen pen, Rectangle bounds, int radius)
+    {
+        int diameter = radius * 2;
+        using (GraphicsPath path = new GraphicsPath())
+        {
+            path.AddArc(bounds.X, bounds.Y, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Y, diameter, diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(bounds.X, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            graphics.DrawPath(pen, path);
         }
     }
 }
@@ -116,9 +160,11 @@ $timer.Add_Tick({
     if ($writeTime -eq $lastWrite) { return }
 
     try {
-        $state = Get-Content -LiteralPath $resolvedStatePath -Raw | ConvertFrom-Json
+        $state = Get-Content -LiteralPath $resolvedStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
         $form.Location = [System.Drawing.Point]::new([int]$state.x, [int]$state.y)
         $form.PointerLabel = if ($state.label) { [string]$state.label } else { 'AI' }
+        $form.MessageText = if ($state.message) { [string]$state.message } else { '' }
+        $form.Tone = if ($state.tone) { [string]$state.tone } else { 'working' }
         $form.Visible = ($state.visible -ne $false)
         $form.Invalidate()
         $script:lastWrite = $writeTime

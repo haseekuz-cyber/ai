@@ -58,6 +58,33 @@ if (-not $env:AI_WORKSTATION_SKILLS) {
 if (-not $env:AI_WORKSTATION_AUDIT_LOG) {
     $env:AI_WORKSTATION_AUDIT_LOG = Join-Path $dataRoot 'Logs\actions.jsonl'
 }
+if (-not $env:AI_WORKSTATION_FEEDBACK_LOG) {
+    $env:AI_WORKSTATION_FEEDBACK_LOG = Join-Path $dataRoot 'Learning\episodes.jsonl'
+}
+if (-not $env:AI_WORKSTATION_PRINCIPLES) {
+    $env:AI_WORKSTATION_PRINCIPLES = Join-Path $dataRoot 'Learning\principles.json'
+}
+if (-not $env:AI_WORKSTATION_TEACHER_PROFILE) {
+    $env:AI_WORKSTATION_TEACHER_PROFILE = Join-Path $dataRoot 'Learning\teacher-profile.json'
+}
+if (-not $env:AI_WORKSTATION_TEACHER_CHAT_LOG) {
+    $env:AI_WORKSTATION_TEACHER_CHAT_LOG = Join-Path $dataRoot 'Learning\teacher-chat.jsonl'
+}
+if (-not $env:AI_WORKSTATION_TEACHER_EXPERIENCES) {
+    $env:AI_WORKSTATION_TEACHER_EXPERIENCES = Join-Path $dataRoot 'Learning\teacher-experiences.jsonl'
+}
+if (-not $env:AI_WORKSTATION_TEACHER_MATERIALS) {
+    $env:AI_WORKSTATION_TEACHER_MATERIALS = Join-Path $dataRoot 'Learning\teacher-materials.jsonl'
+}
+if (-not $env:AI_WORKSTATION_TEACHER_CHAT) {
+    $env:AI_WORKSTATION_TEACHER_CHAT = Join-Path $dataRoot 'TeacherChat'
+}
+if (-not $env:AI_WORKSTATION_TEACHER_SANDBOX) {
+    $env:AI_WORKSTATION_TEACHER_SANDBOX = Join-Path $dataRoot 'TeacherSandbox'
+}
+if (-not $env:AI_WORKSTATION_TEACHER_BACKUPS) {
+    $env:AI_WORKSTATION_TEACHER_BACKUPS = Join-Path $dataRoot 'TeacherBackups'
+}
 if (-not $env:AI_WORKSTATION_SAFETY_STATE) {
     $env:AI_WORKSTATION_SAFETY_STATE = Join-Path $dataRoot 'State\safety.json'
 }

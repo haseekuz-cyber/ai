@@ -28,7 +28,7 @@ foreach ($directory in @('src', 'public', 'docs')) {
 
 $scriptsDestination = Join-Path $bundleRoot 'scripts'
 New-Item -ItemType Directory -Path $scriptsDestination -Force | Out-Null
-foreach ($script in @('diagnose.ps1', 'capture-display.ps1', 'capture-window.ps1', 'crop-image.ps1', 'detect-telegram-badges.ps1', 'window-message.ps1', 'check-lmstudio-vision.mjs', 'uia-bridge.ps1', 'virtual-pointer.ps1', 'uia-test-app.ps1', 'uia-test-app.cs', 'launcher.cs', 'build-launcher.ps1', 'start-all.ps1', 'start-controller.ps1', 'start-controller.cmd', 'start-worker.ps1', 'start-worker.cmd')) {
+foreach ($script in @('diagnose.ps1', 'capture-display.ps1', 'capture-window.ps1', 'window-observer.ps1', 'crop-image.ps1', 'detect-telegram-badges.ps1', 'window-message.ps1', 'check-lmstudio-vision.mjs', 'uia-bridge.ps1', 'virtual-pointer.ps1', 'uia-test-app.ps1', 'uia-test-app.cs', 'launcher.cs', 'build-launcher.ps1', 'start-all.ps1', 'start-controller.ps1', 'start-controller.cmd', 'start-worker.ps1', 'start-worker.cmd')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination $scriptsDestination -Force
 }
 
