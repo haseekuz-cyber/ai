@@ -193,11 +193,31 @@ try {
     [AiPointerBridgeNative+RECT]$windowRect = [AiPointerBridgeNative+RECT]::new()
     if (-not [AiPointerBridgeNative]::GetWindowRect($handle, [ref]$windowRect)) { throw 'Could not read target window bounds.' }
     $hasPoint = $null -ne $request.point
-    $points = if ($request.action -eq 'drag') { @($request.from, $request.to) } elseif ($hasPoint) { @($request.point) } else { @() }
-    foreach ($point in $points) {
-        if (-not (Test-PointInside $point $request.allowedBounds)) { throw 'Pointer point is outside the AI display.' }
+    $pointEntries = @()
+    if ($request.action -eq 'drag') {
+        $pointEntries += [pscustomobject]@{ label = 'from'; point = $request.from }
+        $pointEntries += [pscustomobject]@{ label = 'to'; point = $request.to }
+        if ($null -ne $request.trajectory) {
+            $trajectoryIndex = 0
+            foreach ($trajectoryPoint in @($request.trajectory)) {
+                if ($null -ne $trajectoryPoint) {
+                    $pointEntries += [pscustomobject]@{ label = "trajectory[$trajectoryIndex]"; point = $trajectoryPoint }
+                }
+                $trajectoryIndex++
+            }
+        }
+    }
+    elseif ($hasPoint) {
+        $pointEntries += [pscustomobject]@{ label = 'point'; point = $request.point }
+    }
+    foreach ($entry in $pointEntries) {
+        $point = $entry.point
+        if ($null -eq $point) { throw "PowerShell pointer validation: $($entry.label) is missing." }
+        if (-not (Test-PointInside $point $request.allowedBounds)) {
+            throw "PowerShell pointer validation: $($entry.label) ($($point.x),$($point.y)) is outside the AI display."
+        }
         if ($point.x -lt $windowRect.Left -or $point.x -ge $windowRect.Right -or $point.y -lt $windowRect.Top -or $point.y -ge $windowRect.Bottom) {
-            throw 'Pointer point is outside the target window.'
+            throw "PowerShell pointer validation: $($entry.label) ($($point.x),$($point.y)) is outside the target window."
         }
     }
     if ($request.action -eq 'pressKey' -and -not $hasPoint) {
@@ -277,6 +297,23 @@ try {
             $pressedModifiers = @()
             $mouseDownSent = $false
             $lastPoint = $from
+            $pathPoints = @()
+            if ($null -ne $request.trajectory -and $request.trajectory.Count -gt 0) {
+                foreach ($trajectoryPoint in $request.trajectory) {
+                    $pathPoints += Convert-ClientPoint $inputHandle $trajectoryPoint
+                }
+                if ($pathPoints.Count -eq 0 -or $pathPoints[$pathPoints.Count - 1].X -ne $to.X -or $pathPoints[$pathPoints.Count - 1].Y -ne $to.Y) {
+                    $pathPoints += $to
+                }
+            }
+            else {
+                for ($step = 1; $step -le $steps; $step++) {
+                    $point = [AiPointerBridgeNative+POINT]::new()
+                    $point.X = [int][math]::Round($from.X + (($to.X - $from.X) * $step / $steps))
+                    $point.Y = [int][math]::Round($from.Y + (($to.Y - $from.Y) * $step / $steps))
+                    $pathPoints += $point
+                }
+            }
             try {
                 foreach ($modifier in $modifierSpecs) {
                     if (-not [AiPointerBridgeNative]::PostMessage(
@@ -299,10 +336,8 @@ try {
                 )) { throw 'Could not send mouse-down for the drag.' }
                 $mouseDownSent = $true
 
-                for ($step = 1; $step -le $steps; $step++) {
-                    $point = [AiPointerBridgeNative+POINT]::new()
-                    $point.X = [int][math]::Round($from.X + (($to.X - $from.X) * $step / $steps))
-                    $point.Y = [int][math]::Round($from.Y + (($to.Y - $from.Y) * $step / $steps))
+                $pathDelay = [math]::Max(1, [math]::Floor([int]$request.durationMs / [math]::Max(1, $pathPoints.Count)))
+                foreach ($point in $pathPoints) {
                     if (-not [AiPointerBridgeNative]::PostMessage(
                         $inputHandle,
                         0x0200,
@@ -310,7 +345,7 @@ try {
                         (Pack-Point $point)
                     )) { throw 'Could not continue the drag trajectory.' }
                     $lastPoint = $point
-                    Start-Sleep -Milliseconds ([math]::Max(1, [math]::Floor([int]$request.durationMs / $steps)))
+                    Start-Sleep -Milliseconds $pathDelay
                 }
 
                 if (-not [AiPointerBridgeNative]::PostMessage(
@@ -348,7 +383,9 @@ try {
                 $fieldPoint = Convert-ClientPoint $inputHandle $request.point
                 Send-Click $inputHandle $fieldPoint 'left'
                 Start-Sleep -Milliseconds 80
-                [void](Send-SafeKey $inputHandle 'Ctrl+A')
+                if ([string]$request.textMode -ne 'insert') {
+                    [void](Send-SafeKey $inputHandle 'Ctrl+A')
+                }
                 foreach ($character in ([string]$request.text).ToCharArray()) {
                     [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0102, [UIntPtr]::new([uint64][int]$character), [IntPtr]::Zero)
                 }

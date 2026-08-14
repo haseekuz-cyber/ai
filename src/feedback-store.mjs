@@ -16,6 +16,20 @@ function feedbackKey(record) {
   return record.feedbackId ? `feedback:${record.feedbackId}` : '';
 }
 
+function normalizeVisualEvidence(value) {
+  const beforeImagePath = cleanText(value?.beforeImagePath, 1_000);
+  const afterImagePath = cleanText(value?.afterImagePath, 1_000);
+  if (!beforeImagePath || !afterImagePath) return null;
+  return {
+    schemaVersion: 1,
+    beforeImagePath,
+    afterImagePath,
+    beforeSha256: cleanText(value?.beforeSha256, 128) || null,
+    afterSha256: cleanText(value?.afterSha256, 128) || null,
+    source: cleanText(value?.source, 128) || 'executed-step'
+  };
+}
+
 export function buildStepFeedback({
   feedbackId,
   rating,
@@ -25,6 +39,7 @@ export function buildStepFeedback({
   reason = '',
   expectedResult = '',
   automatedValidation = null,
+  visualEvidence = null,
   planId = null,
   missionId = null,
   runId = null,
@@ -56,7 +71,8 @@ export function buildStepFeedback({
       expectedResult: cleanText(expectedResult),
       humanApproved: normalizedRating === 'positive',
       humanRating: normalizedRating,
-      automatedValidation
+      automatedValidation,
+      visualEvidence: normalizeVisualEvidence(visualEvidence)
     }
   };
 }
@@ -75,7 +91,13 @@ export function buildPlanFeedback({ plan, rating, feedbackId, createdAt = new Da
     action: plan.proposal.action,
     reason: plan.proposal.reason,
     expectedResult: plan.proposal.expectedResult,
-    automatedValidation: plan.validation || null
+    automatedValidation: plan.validation || null,
+    visualEvidence: {
+      beforeImagePath: plan.beforeScreenshot || plan.observation?.outputPath,
+      afterImagePath: plan.afterScreenshot,
+      beforeSha256: plan.beforeSha256 || plan.observation?.sha256,
+      source: 'agent-execution'
+    }
   });
 }
 

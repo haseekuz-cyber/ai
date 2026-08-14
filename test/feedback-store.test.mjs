@@ -9,6 +9,9 @@ test('buildApprovedStep keeps a compact human-approved example', () => {
     plan: {
       planId: 'plan-1', status: 'executed', missionId: 'mission-1', instruction: 'Нарисуй круг',
       window: { processName: 'CorelDRW', className: 'CorelDRAW27' },
+      beforeScreenshot: 'before.png',
+      beforeSha256: 'BEFORE',
+      afterScreenshot: 'after.png',
       proposal: { action: { type: 'click', point: { x: 0.1, y: 0.2 } }, reason: 'Выбрать эллипс', expectedResult: 'Инструмент выбран' },
       validation: { success: true }
     }
@@ -16,6 +19,14 @@ test('buildApprovedStep keeps a compact human-approved example', () => {
   assert.equal(record.kind, 'step_approved');
   assert.equal(record.step.humanApproved, true);
   assert.equal(record.application.processName, 'CorelDRW');
+  assert.deepEqual(record.step.visualEvidence, {
+    schemaVersion: 1,
+    beforeImagePath: 'before.png',
+    afterImagePath: 'after.png',
+    beforeSha256: 'BEFORE',
+    afterSha256: null,
+    source: 'agent-execution'
+  });
 });
 
 test('approvedStepsForPrompt states that coordinates are not replayed blindly', () => {

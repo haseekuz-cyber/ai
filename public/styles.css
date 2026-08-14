@@ -10,7 +10,7 @@
 
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 280px;
   min-height: 100vh;
   background:
     radial-gradient(circle at 75% -10%, rgba(94, 92, 230, .22), transparent 36rem),
@@ -36,6 +36,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   justify-content: space-between;
   margin-bottom: 30px;
 }
+.top-actions { display: flex; gap: 9px; }
 
 .brand { gap: 12px; }
 .brand div { display: grid; gap: 2px; }
@@ -62,9 +63,17 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   background: rgba(18, 21, 29, .72);
 }
 .quiet.danger:hover { border-color: #743846; color: #ff9aaa; }
+.quiet.full-shutdown {
+  border-color: #8f3142;
+  color: #fff;
+  background: #7b2232;
+}
+.quiet.full-shutdown:hover { border-color: #e15168; background: #982d40; }
 .quiet.resume { border-color: #286447; color: #7ce3ad; }
+.quiet.anarchy { border-color: #5d4a22; color: #f3c86d; }
+.quiet.anarchy.active { border-color: #a86b2e; color: #fff0bd; background: #392817; }
 
-.composer, .step-card, .feedback-card, .demo-panel {
+.composer, .step-card, .feedback-card, .correction-card, .demo-panel, .teacher-chat, .teacher-panel, .principles-panel {
   border: 1px solid #242936;
   border-radius: 22px;
   background: rgba(16, 19, 26, .86);
@@ -121,13 +130,21 @@ textarea::placeholder { color: #666e81; }
 
 .hint { min-height: 20px; margin: 11px 3px 0; color: #8991a5; font-size: 13px; }
 .hint.error { color: #ff8c9a; }
+.jarvis-activity { display: grid; gap: 3px; margin: 8px 3px 0; color: #9aa3b8; font-size: 12px; line-height: 1.35; }
+.jarvis-activity[hidden] { display: none; }
+.jarvis-activity p { margin: 0; }
+.jarvis-activity p:not(:first-child) { opacity: .58; }
+.jarvis-activity strong { color: #c9ccff; }
 
 .step-card { margin-top: 16px; padding: 24px; }
 .step-number { color: #8187ff; font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .step-card h1 { margin: 8px 0 10px; font-size: clamp(22px, 4vw, 31px); line-height: 1.15; }
 .action-line { margin: 0 0 8px; color: #c5cada; }
 .expected { margin: 0 0 20px; color: #858da1; font-size: 14px; }
-.step-card .primary { width: auto; min-width: 220px; }
+.teacher-review { margin: -9px 0 18px; color: #aeb2ff; font-size: 13px; }
+.step-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.step-card .primary { width: auto; min-width: 220px; margin-top: 0; }
+.step-card .quiet { padding: 13px 16px; }
 
 .feedback-card {
   justify-content: space-between;
@@ -151,6 +168,14 @@ textarea::placeholder { color: #666e81; }
 .rating.positive:not(:disabled):hover { background: #1a422f; }
 .rating.negative:not(:disabled):hover { background: #45232d; }
 
+.correction-card { margin-top: 16px; padding: 18px 20px; }
+.correction-card > div:first-child { display: grid; gap: 3px; margin-bottom: 12px; }
+.correction-card p { margin: 0; color: #8d95a9; font-size: 13px; }
+.correction-card textarea { min-height: 78px; padding: 13px 15px; font-size: 14px; }
+.correction-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
+.correction-actions .primary, .correction-actions .demo-button, .correction-actions .quiet { width: auto; min-width: 150px; margin: 0; }
+.primary.compact { padding: 12px 16px; }
+
 .demo-panel { margin-top: 16px; overflow: hidden; }
 .demo-heading { justify-content: space-between; gap: 18px; padding: 18px 20px; }
 .demo-heading > div { display: grid; gap: 3px; }
@@ -158,6 +183,10 @@ textarea::placeholder { color: #666e81; }
 .demo-button { padding: 12px 17px; color: #e2e4ec; background: #242936; }
 .demo-button.recording { color: #fff; background: #d1495b; animation: recording 1.2s infinite; }
 .demo-run { width: calc(100% - 40px); margin: 0 20px 20px; }
+.observation-review { margin: 0 20px 20px; padding: 14px; border: 1px solid #2c3344; border-radius: 14px; background: #111620; }
+.observation-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.observation-actions button { width: auto; margin: 0; }
+.observation-understanding { margin: 12px 0 0; color: #cbd2e2; line-height: 1.5; }
 
 .demo-live { padding: 0 20px 20px; }
 .trace-wrap {
@@ -180,6 +209,72 @@ textarea::placeholder { color: #666e81; }
 .key { color: #e7e9f1; background: #252a36; box-shadow: inset 0 -2px 0 #151821; }
 .key-placeholder { color: #656d80; padding-left: 0; }
 
+.teacher-chat { margin-top: 16px; overflow: hidden; }
+.teacher-chat-heading { padding: 18px 20px 12px; }
+.teacher-chat-heading > div { display: grid; gap: 3px; }
+.teacher-chat-heading span { color: #8790a4; font-size: 13px; }
+.teacher-messages { display: grid; gap: 9px; max-height: 320px; overflow: auto; padding: 0 20px 14px; }
+.teacher-message { max-width: 88%; padding: 11px 13px; border: 1px solid #292f3e; border-radius: 14px; background: #11151d; }
+.teacher-message.user { justify-self: end; border-color: #4d4f91; background: #21234a; }
+.teacher-message strong { color: #aeb2ff; font-size: 11px; }
+.teacher-message p { margin: 4px 0 0; white-space: pre-wrap; color: #e4e7ef; font-size: 13px; line-height: 1.45; }
+.screenshot-badge { display: inline-block; margin-top: 7px; color: #8f98aa; font-size: 11px; }
+.teacher-chat-input { padding: 0 20px 20px; }
+.teacher-mode-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.teacher-mode-row select { flex: 1; min-width: 0; }
+.teacher-internet { display: flex; align-items: center; gap: 7px; white-space: nowrap; color: #b7bed0; font-size: 13px; }
+.teacher-internet input { width: auto; }
+.teacher-chat-input textarea { min-height: 76px; padding: 12px 14px; font-size: 14px; }
+.teacher-chat-actions { display: flex; align-items: center; gap: 9px; margin-top: 10px; }
+.teacher-chat-actions .primary { width: auto; margin: 0 0 0 auto; }
+.attachment-button { cursor: pointer; border: 1px solid #343a48; border-radius: 11px; padding: 10px 12px; color: #d9ddeb; background: #202530; font-size: 13px; }
+.attachment-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #747d91; font-size: 12px; }
+.teacher-proposal { margin: 0 20px 20px; padding: 14px; border: 1px solid #3b5e49; border-radius: 14px; background: #102219; }
+.teacher-task { margin: 0 20px 20px; padding: 14px; border: 1px solid #4b4f88; border-radius: 14px; background: #171936; }
+.teacher-task p { color: #c7cae7; font-size: 12px; }
+.teacher-task .primary { width: auto; margin-top: 6px; }
+.teacher-proposal p, .teacher-proposal li { color: #b8c7bd; font-size: 12px; }
+.teacher-proposal ul { padding-left: 20px; }
+.teacher-proposal .primary { width: auto; margin-top: 6px; }
+
+.teacher-panel, .principles-panel { margin-top: 16px; overflow: hidden; }
+.teacher-panel summary, .principles-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px;
+  cursor: pointer;
+  list-style: none;
+}
+.teacher-panel summary::-webkit-details-marker, .principles-panel summary::-webkit-details-marker { display: none; }
+.teacher-panel summary > span:first-child, .principles-panel summary > span:first-child { display: flex; align-items: center; gap: 9px; }
+.teacher-panel summary small { padding: 3px 8px; border-radius: 999px; color: #9ce5bd; background: #183729; font-size: 11px; }
+.principles-panel summary small { min-width: 25px; padding: 3px 7px; border-radius: 999px; color: #cdd1ff; background: #292d58; text-align: center; }
+.summary-hint, .principles-help { color: #8790a4; font-size: 13px; }
+.principles-help { margin: 0; padding: 0 20px 14px; }
+.principles-list { display: grid; gap: 10px; padding: 0 20px 20px; }
+.principle-item { display: grid; gap: 9px; padding: 14px; border: 1px solid #2a3040; border-radius: 14px; background: #0d1016; }
+.principle-item input, .principle-item textarea { width: 100%; border: 1px solid #2a3040; border-radius: 10px; outline: 0; color: #eef0f7; background: #151923; }
+.principle-item input { padding: 10px 12px; font-weight: 700; }
+.principle-item textarea { min-height: 76px; padding: 11px 12px; resize: vertical; font-size: 13px; }
+.core-principle input[readonly], .core-principle textarea[readonly] { border-color: transparent; background: #10141c; cursor: default; }
+.learned-experience strong { color: #d9dcff; }
+.learned-experience p { margin: 0; color: #c5cad8; font-size: 13px; line-height: 1.45; }
+.knowledge-heading { margin-top: 8px; color: #aeb2ff; font-size: 13px; }
+.principle-meta { color: #70798d; font-size: 11px; }
+.principle-actions { display: flex; gap: 8px; }
+.principle-actions button { width: auto; margin: 0; padding: 9px 13px; }
+.principle-delete { border-color: #653541; color: #ff9aaa; }
+.principles-empty { padding: 4px 0 8px; color: #747d91; font-size: 13px; }
+.teacher-form { display: grid; gap: 8px; padding: 0 20px 20px; }
+.teacher-form label { color: #9da5b8; font-size: 12px; }
+.teacher-form input, .teacher-form textarea { width: 100%; border: 1px solid #2a3040; border-radius: 10px; outline: 0; color: #eef0f7; background: #0d1016; }
+.teacher-form input { padding: 10px 12px; }
+.teacher-form textarea { min-height: 70px; padding: 11px 12px; resize: vertical; font-size: 13px; }
+.teacher-form .primary { width: auto; justify-self: start; margin-top: 4px; }
+.teacher-form .principles-help { padding: 0; }
+
 [hidden] { display: none !important; }
 
 @keyframes pulse { 50% { opacity: .35; } }
@@ -190,7 +285,21 @@ textarea::placeholder { color: #666e81; }
   .topbar { margin-bottom: 18px; }
   .target-row, .feedback-card, .demo-heading { align-items: stretch; flex-direction: column; }
   select { width: 100%; }
-  .step-card .primary, .demo-button { width: 100%; }
+  .step-actions { flex-direction: column; align-items: stretch; }
+  .step-card .primary, .step-card .quiet, .demo-button { width: 100%; }
   .rating-buttons { justify-content: stretch; }
   .rating { flex: 1; width: auto; }
+  .correction-actions { flex-direction: column; }
+  .correction-actions .primary, .correction-actions .demo-button, .correction-actions .quiet { width: 100%; }
+  .observation-actions button { width: 100%; }
+  .teacher-chat-actions { align-items: stretch; flex-direction: column; }
+  .teacher-mode-row { align-items: stretch; flex-direction: column; }
+  .teacher-chat-actions .primary, .attachment-button { width: 100%; margin: 0; text-align: center; }
+}
+
+@media (max-width: 420px) {
+  .topbar { align-items: stretch; flex-direction: column; gap: 12px; }
+  .brand { padding: 0 4px; }
+  .top-actions { width: 100%; }
+  .top-actions button { flex: 1; }
 }

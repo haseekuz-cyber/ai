@@ -6,10 +6,14 @@ import { readJson, sendJson, sendText } from './http-utils.mjs';
 import { normalizeTask } from './protocol.mjs';
 import { collectWindowsDiagnostics } from './windows-diagnostics.mjs';
 import { evaluateIndependentControl } from './independent-control.mjs';
+import { startLmStudioRuntime, stopLmStudioRuntime } from './lmstudio-runtime.mjs';
 
 const staticFiles = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/anarchy-recovery.js', ['anarchy-recovery.js', 'text/javascript; charset=utf-8']],
+  ['/observation-flow.js', ['observation-flow.js', 'text/javascript; charset=utf-8']],
+  ['/skill-flow.js', ['skill-flow.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']]
 ]);
 
@@ -118,7 +122,29 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === 'GET' && url.pathname === '/api/uia/windows') {
       try {
-        const worker = await callWorker('/uia/windows', { timeoutMs: 30_000 });
+        // Keep the HTTP deadline above the Worker's cold-start UI Automation deadline.
+        const worker = await callWorker('/uia/windows', { timeoutMs: 40_000 });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/observation/watch') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/observation/watch', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 45_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/observation/status') {
+      try {
+        const worker = await callWorker('/observation/status', { timeoutMs: 10_000 });
         return sendJson(response, worker.status, worker.value);
       } catch (error) {
         return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
@@ -301,6 +327,105 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/knowledge/status') {
+      try {
+        const worker = await callWorker('/knowledge/status', { timeoutMs: 15_000 });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/teacher/profile') {
+      try {
+        const worker = await callWorker('/teacher/profile', { timeoutMs: 15_000 });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/teacher/profile') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/teacher/profile', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 15_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/teacher/chat') {
+      try {
+        const worker = await callWorker('/teacher/chat', { timeoutMs: 15_000 });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/teacher/chat') {
+      try {
+        const input = await readJson(request, 10 * 1024 * 1024);
+        const worker = await callWorker('/teacher/chat', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 300_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/teacher/code/apply') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/teacher/code/apply', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 180_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/knowledge/principles/update') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/knowledge/principles/update', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 15_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/knowledge/principles/delete') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/knowledge/principles/delete', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 15_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/missions/correct-step') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/missions/correct-step', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 30_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/teach/status') {
       try {
         const worker = await callWorker('/teach/status');
@@ -323,7 +448,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/teach/stop') {
       try {
         const input = await readJson(request);
-        const worker = await callWorker('/teach/stop', { method: 'POST', body: JSON.stringify(input), timeoutMs: 45_000 });
+        const worker = await callWorker('/teach/stop', { method: 'POST', body: JSON.stringify(input), timeoutMs: 360_000 });
         return sendJson(response, worker.status, worker.value);
       } catch (error) {
         return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
@@ -400,11 +525,55 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/system/shutdown') {
+      const input = await readJson(request);
+      if (input.confirmed !== true) {
+        return sendJson(response, 409, {
+          error: 'confirmation_required',
+          message: 'confirmed=true is required for full shutdown.'
+        });
+      }
+      const errors = [];
+      let worker = null;
+      try {
+        worker = await callWorker('/system/shutdown', {
+          method: 'POST',
+          body: JSON.stringify({ confirmed: true }),
+          timeoutMs: 15_000
+        });
+      } catch (error) {
+        errors.push(`worker: ${error.message}`);
+      }
+      let modelRuntime = null;
+      try {
+        modelRuntime = await stopLmStudioRuntime({
+          baseUrl: config.lmStudioBaseUrl,
+          closeDesktop: true
+        });
+      } catch (error) {
+        errors.push(`LM Studio: ${error.message}`);
+      }
+      sendJson(response, errors.length ? 207 : 200, {
+        shutdown: true,
+        worker: worker?.value || null,
+        modelRuntime,
+        errors
+      });
+      setTimeout(() => {
+        server.close(() => process.exit(0));
+        setTimeout(() => process.exit(0), 1_500).unref();
+      }, 350).unref();
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/safety/pause') {
       try {
         const input = await readJson(request);
         const worker = await callWorker('/safety/pause', { method: 'POST', body: JSON.stringify(input) });
-        return sendJson(response, worker.status, worker.value);
+        const modelRuntime = input.stopModel === true
+          ? await stopLmStudioRuntime({ baseUrl: config.lmStudioBaseUrl })
+          : null;
+        return sendJson(response, worker.status, { ...worker.value, modelRuntime });
       } catch (error) {
         return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
       }
@@ -413,8 +582,15 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/safety/resume') {
       try {
         const input = await readJson(request);
-        const worker = await callWorker('/safety/resume', { method: 'POST', body: JSON.stringify(input) });
-        return sendJson(response, worker.status, worker.value);
+        const modelRuntime = input.startModel === true
+          ? await startLmStudioRuntime({ baseUrl: config.lmStudioBaseUrl, model: config.lmStudioModel })
+          : null;
+        const worker = await callWorker('/safety/resume', {
+          method: 'POST',
+          body: JSON.stringify(input),
+          timeoutMs: 15_000
+        });
+        return sendJson(response, worker.status, { ...worker.value, modelRuntime });
       } catch (error) {
         return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
       }

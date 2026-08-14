@@ -39,6 +39,28 @@ test('preview-only mouse and keyboard events do not fragment logical text steps'
   assert.deepEqual(skill.demonstration.keyboard.map((item) => item.key), ['B']);
 });
 
+test('printable keyboard-hook text is combined into one reusable canvas text step', () => {
+  const skill = buildSkillFromRecording({
+    skillId: 'keyboard-canvas',
+    name: 'Canvas typing',
+    instruction: 'Type on the canvas',
+    window: {
+      name: 'Untitled', processName: 'Editor', className: 'Canvas',
+      bounds: { x: 0, y: 0, width: 1000, height: 800 }
+    },
+    recording: { events: [
+      { type: 'click', atMs: 1, x: 300, y: 250, button: 'left' },
+      { type: 'typeText', source: 'keyboard-hook', atMs: 10, x: 300, y: 250, automationId: 'canvas', name: 'Canvas', controlType: 'Pane', text: 'П' },
+      { type: 'typeText', source: 'keyboard-hook', atMs: 20, x: 300, y: 250, automationId: 'canvas', name: 'Canvas', controlType: 'Pane', text: 'р' }
+    ] },
+    elements: []
+  });
+  assert.equal(skill.steps.length, 2);
+  assert.equal(skill.steps[1].type, 'typeText');
+  assert.equal(skill.steps[1].text, 'Пр');
+  assert.deepEqual(skill.steps[1].point, { x: 0.3, y: 0.3125 });
+});
+
 test('passive application value changes are not learned as user typing', () => {
   const skill = buildSkillFromRecording({
     skillId: 'skill-2', name: 'Перетащить', instruction: 'Перетащите объект',
@@ -54,4 +76,59 @@ test('passive application value changes are not learned as user typing', () => {
     elements: []
   });
   assert.deepEqual(skill.steps.map((step) => step.type), ['drag']);
+});
+
+test('a demonstrated drag retains its non-linear path as adaptive evidence', () => {
+  const skill = buildSkillFromRecording({
+    skillId: 'skill-path', name: 'Кривая', instruction: 'Нарисуйте кривую',
+    window: {
+      name: 'Test', processName: 'TestApp', className: 'TestWindow',
+      bounds: { x: 0, y: 0, width: 1000, height: 1000 }
+    },
+    recording: { events: [
+      { type: 'pointerMove', atMs: 110, x: 200, y: 350 },
+      { type: 'pointerMove', atMs: 180, x: 350, y: 200 },
+      { type: 'drag', atMs: 100, x: 100, y: 100, toX: 500, toY: 500, durationMs: 200, controlType: 'Pane' }
+    ] },
+    elements: []
+  });
+  assert.equal(skill.steps[0].trajectoryMode, 'adaptive');
+  assert.match(skill.steps[0].expectedResult, /visibl/i);
+  assert.deepEqual(skill.steps[0].trajectory, [
+    { x: 0.1, y: 0.1 }, { x: 0.2, y: 0.35 }, { x: 0.35, y: 0.2 }, { x: 0.5, y: 0.5 }
+  ]);
+});
+
+test('logical demonstration steps keep their own before and after visual evidence', () => {
+  const skill = buildSkillFromRecording({
+    skillId: 'skill-frames', name: 'Two steps', instruction: 'Perform two visible actions',
+    window: {
+      name: 'Test', processName: 'TestApp', className: 'TestWindow',
+      bounds: { x: 0, y: 0, width: 1000, height: 800 }
+    },
+    recording: {
+      initialVisualFrame: { imagePath: 'before.png', sha256: 'BEFORE', atMs: 0, throughSequence: 0 },
+      finalVisualFrame: { imagePath: 'final.png', sha256: 'FINAL', atMs: 500, throughSequence: 2 },
+      visualFrames: [
+        { imagePath: 'step-1.png', atMs: 150, throughSequence: 1 },
+        { imagePath: 'step-2.png', atMs: 300, throughSequence: 2 }
+      ],
+      events: [
+        { type: 'click', sequence: 1, atMs: 100, x: 100, y: 100, button: 'left' },
+        { type: 'pressKey', sequence: 2, atMs: 250, key: 'Enter' }
+      ]
+    },
+    elements: []
+  });
+  assert.deepEqual(skill.steps[0].visualEvidence, {
+    schemaVersion: 1,
+    beforeImagePath: 'before.png',
+    afterImagePath: 'step-1.png',
+    beforeSha256: 'BEFORE',
+    afterSha256: null,
+    capturedAtMs: 150,
+    source: 'live-demonstration'
+  });
+  assert.equal(skill.steps[1].visualEvidence.beforeImagePath, 'step-1.png');
+  assert.equal(skill.steps[1].visualEvidence.afterImagePath, 'step-2.png');
 });

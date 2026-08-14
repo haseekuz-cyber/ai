@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -36,6 +38,7 @@ public static class AIWorkstationTeachRecorder
         public string livePath;
         public string readyPath;
         public string stopPath;
+        public string evidenceDirectory;
         public int maxDurationMs;
     }
     public sealed class RecordedEvent
@@ -57,6 +60,14 @@ public static class AIWorkstationTeachRecorder
         public bool sensitive;
         public string source;
         public string[] modifiers;
+        public long sequence;
+    }
+    public sealed class RecordedFrame
+    {
+        public long throughSequence;
+        public int logicalEventCount;
+        public long atMs;
+        public string imagePath;
     }
     public sealed class RecorderOutput
     {
@@ -65,7 +76,9 @@ public static class AIWorkstationTeachRecorder
         public string stoppedAt;
         public long targetWindowHandle;
         public List<RecordedEvent> events;
+        public List<RecordedFrame> visualFrames;
         public List<string> warnings;
+        public string stopReason;
     }
 
     private sealed class PendingPointer { public POINT Point; public long AtMs; public string Button; public string[] Modifiers; }
@@ -84,6 +97,7 @@ public static class AIWorkstationTeachRecorder
     private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
     private static readonly object Sync = new object();
     private static readonly List<RecordedEvent> Events = new List<RecordedEvent>();
+    private static readonly List<RecordedFrame> VisualFrames = new List<RecordedFrame>();
     private static readonly List<string> Warnings = new List<string>();
     private static readonly Stopwatch Clock = new Stopwatch();
     private static HookProc mouseProc;
@@ -105,6 +119,14 @@ public static class AIWorkstationTeachRecorder
     private static long lastMoveAtMs;
     private static int lastLiveEventCount = -1;
     private static long lastKeyboardAtMs = -10000;
+    private static bool hasLastPointerInteraction;
+    private static POINT lastPointerInteraction;
+    private static long lastPointerInteractionAtMs;
+    private static long nextSequence;
+    private static long lastCapturedSequence;
+    private static bool evidenceWarningWritten;
+    private static volatile bool hotkeyStopRequested;
+    private static string stopReason = "controller";
 
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetWindowsHookEx(int idHook, HookProc callback, IntPtr module, uint threadId);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool UnhookWindowsHookEx(IntPtr hook);
@@ -113,6 +135,14 @@ public static class AIWorkstationTeachRecorder
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool GetKeyboardState(byte[] keyState);
+    [DllImport("user32.dll")] private static extern IntPtr GetKeyboardLayout(uint threadId);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int ToUnicodeEx(
+        uint virtualKey, uint scanCode, byte[] keyState, StringBuilder buffer,
+        int bufferCapacity, uint flags, IntPtr keyboardLayout);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
     [STAThread]
     public static int Main(string[] args)
@@ -211,6 +241,7 @@ public static class AIWorkstationTeachRecorder
             };
             lock (Sync)
             {
+                item.sequence = ++nextSequence;
                 if (Events.Count > 0 && Events[Events.Count - 1].type == "typeText" &&
                     Events[Events.Count - 1].automationId == item.automationId &&
                     Events[Events.Count - 1].name == item.name)
@@ -287,15 +318,23 @@ public static class AIWorkstationTeachRecorder
         {
             KBDLLHOOKSTRUCT data = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
             Keys key = (Keys)data.vkCode;
+            Keys activeModifiers = Control.ModifierKeys;
+            if (key == Keys.F10 && (activeModifiers & Keys.Control) == Keys.Control && (activeModifiers & Keys.Alt) == Keys.Alt)
+            {
+                hotkeyStopRequested = true;
+                return new IntPtr(1);
+            }
             string safeKey = SafeRecordedKey(key);
             string previewKey = SafePreviewKey(key);
-            if (safeKey != null || previewKey != null)
+            string typedText = safeKey == null ? TranslateKeyToText(data) : null;
+            if (safeKey != null || previewKey != null || typedText != null)
             {
                 lastKeyboardAtMs = Clock.ElapsedMilliseconds;
                 RecordedEvent item = new RecordedEvent {
-                    type = safeKey != null ? "pressKey" : "keyPreview",
+                    type = safeKey != null ? "pressKey" : (typedText != null ? "typeText" : "keyPreview"),
                     atMs = Clock.ElapsedMilliseconds,
                     key = safeKey ?? previewKey,
+                    text = typedText,
                     source = "keyboard-hook"
                 };
                 try
@@ -313,10 +352,39 @@ public static class AIWorkstationTeachRecorder
                     }
                 }
                 catch { }
+                if (item.type == "typeText" && hasLastPointerInteraction &&
+                    item.atMs - lastPointerInteractionAtMs <= 15000 &&
+                    item.controlType != "Edit" && item.controlType != "Document" && item.controlType != "ComboBox")
+                {
+                    item.x = lastPointerInteraction.X;
+                    item.y = lastPointerInteraction.Y;
+                }
                 if (!item.sensitive || safeKey != null) AddEvent(item);
             }
         }
         return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+    }
+
+    private static string TranslateKeyToText(KBDLLHOOKSTRUCT data)
+    {
+        try
+        {
+            Keys modifiers = Control.ModifierKeys;
+            bool control = (modifiers & Keys.Control) == Keys.Control;
+            bool alt = (modifiers & Keys.Alt) == Keys.Alt;
+            // Plain Ctrl or Alt is a shortcut. Ctrl+Alt may be AltGr and can produce text.
+            if (control != alt) return null;
+            byte[] state = new byte[256];
+            if (!GetKeyboardState(state)) return null;
+            uint processId;
+            uint threadId = GetWindowThreadProcessId(GetForegroundWindow(), out processId);
+            StringBuilder buffer = new StringBuilder(8);
+            int count = ToUnicodeEx(data.vkCode, data.scanCode, state, buffer, buffer.Capacity, 0, GetKeyboardLayout(threadId));
+            if (count <= 0) return null;
+            string value = buffer.ToString(0, Math.Min(count, buffer.Length));
+            return String.IsNullOrEmpty(value) || Char.IsControl(value[0]) ? null : value;
+        }
+        catch { return null; }
     }
 
     private static string SafeNonTextKey(Keys key)
@@ -389,6 +457,9 @@ public static class AIWorkstationTeachRecorder
     private static void CompletePointer(PendingPointer pending, POINT end)
     {
         if (pending == null || !PointBelongsToTarget(end)) return;
+        hasLastPointerInteraction = true;
+        lastPointerInteraction = end;
+        lastPointerInteractionAtMs = Clock.ElapsedMilliseconds;
         int dx = end.X - pending.Point.X;
         int dy = end.Y - pending.Point.Y;
         int duration = (int)Math.Min(Int32.MaxValue, Clock.ElapsedMilliseconds - pending.AtMs);
@@ -417,14 +488,108 @@ public static class AIWorkstationTeachRecorder
 
     private static void AddEvent(RecordedEvent item)
     {
-        lock (Sync) Events.Add(item);
+        lock (Sync)
+        {
+            if (item != null && item.type == "typeText" && item.source == "keyboard-hook" &&
+                !String.IsNullOrEmpty(item.text))
+            {
+                for (int index = Events.Count - 1; index >= 0; index--)
+                {
+                    RecordedEvent previous = Events[index];
+                    if (previous.type == "pointerMove" || previous.type == "keyPreview") continue;
+                    if (previous.type == "typeText" && previous.source == "keyboard-hook" &&
+                        previous.automationId == item.automationId && previous.name == item.name &&
+                        item.atMs - previous.atMs <= 1500)
+                    {
+                        previous.text = (previous.text ?? String.Empty) + item.text;
+                        previous.atMs = item.atMs;
+                        previous.sequence = ++nextSequence;
+                        return;
+                    }
+                    break;
+                }
+            }
+            item.sequence = ++nextSequence;
+            Events.Add(item);
+        }
+    }
+
+    private static bool IsLogicalEvidenceEvent(RecordedEvent item)
+    {
+        return item != null && item.type != "pointerMove" && item.type != "keyPreview";
+    }
+
+    private static void CaptureVisualEvidence(bool force)
+    {
+        if (String.IsNullOrEmpty(config.evidenceDirectory)) return;
+        long throughSequence = 0;
+        long latestAtMs = 0;
+        int logicalCount = 0;
+        lock (Sync)
+        {
+            foreach (RecordedEvent item in Events)
+            {
+                if (!IsLogicalEvidenceEvent(item)) continue;
+                logicalCount++;
+                if (item.sequence > throughSequence) throughSequence = item.sequence;
+                if (item.atMs > latestAtMs) latestAtMs = item.atMs;
+            }
+        }
+        if (!force && throughSequence <= lastCapturedSequence) return;
+        if (!force && Clock.ElapsedMilliseconds - latestAtMs < 120) return;
+        try
+        {
+            RECT rect;
+            if (!GetWindowRect(targetHandle, out rect)) throw new InvalidOperationException("Could not read target window bounds.");
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+            if (width <= 0 || height <= 0) throw new InvalidOperationException("Target window bounds are empty.");
+            Directory.CreateDirectory(config.evidenceDirectory);
+            string imagePath = Path.Combine(config.evidenceDirectory, String.Format("step-frame-{0:D6}-{1:D6}.png", throughSequence, Clock.ElapsedMilliseconds));
+            using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+                bitmap.Save(imagePath, ImageFormat.Png);
+            }
+            lock (Sync)
+            {
+                if (VisualFrames.Count >= 256)
+                {
+                    // Keep the early context and a sliding recent history. The
+                    // previous implementation stopped capturing forever at
+                    // frame 256, so a long demonstration had no final result.
+                    RecordedFrame replaced = VisualFrames[128];
+                    VisualFrames.RemoveAt(128);
+                    try { if (File.Exists(replaced.imagePath)) File.Delete(replaced.imagePath); } catch { }
+                }
+                VisualFrames.Add(new RecordedFrame {
+                    throughSequence = throughSequence,
+                    logicalEventCount = logicalCount,
+                    atMs = Clock.ElapsedMilliseconds,
+                    imagePath = imagePath
+                });
+            }
+            lastCapturedSequence = throughSequence;
+        }
+        catch (Exception error)
+        {
+            if (!evidenceWarningWritten)
+            {
+                lock (Sync) Warnings.Add("Per-step visual evidence unavailable: " + error.Message);
+                evidenceWarningWritten = true;
+            }
+        }
     }
 
     private static void CheckStop()
     {
         if (stopping) return;
+        CaptureVisualEvidence(false);
         WriteLiveSnapshot();
-        if (File.Exists(config.stopPath) || Clock.ElapsedMilliseconds >= Math.Max(1000, config.maxDurationMs)) Stop();
+        if (hotkeyStopRequested) Stop("hotkey");
+        else if (File.Exists(config.stopPath)) Stop("controller");
+        else if (Clock.ElapsedMilliseconds >= Math.Max(1000, config.maxDurationMs)) Stop("timeout");
     }
 
     private static void WriteLiveSnapshot()
@@ -443,19 +608,23 @@ public static class AIWorkstationTeachRecorder
             startedAt = startedAt,
             stoppedAt = stopped ? DateTime.UtcNow.ToString("o") : null,
             targetWindowHandle = config.targetWindowHandle
+            ,stopReason = stopped ? stopReason : null
         };
         lock (Sync)
         {
             output.events = new List<RecordedEvent>(Events);
             output.events.Sort(delegate(RecordedEvent a, RecordedEvent b) { return a.atMs.CompareTo(b.atMs); });
+            output.visualFrames = new List<RecordedFrame>(VisualFrames);
             output.warnings = new List<string>(Warnings);
         }
         File.WriteAllText(outputPath, new JavaScriptSerializer().Serialize(output), new UTF8Encoding(false));
     }
 
-    private static void Stop()
+    private static void Stop(string reason)
     {
         stopping = true;
+        stopReason = String.IsNullOrEmpty(reason) ? "controller" : reason;
+        CaptureVisualEvidence(true);
         WriteSnapshot(config.outputPath, true);
         context.ExitThread();
     }

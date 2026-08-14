@@ -71,18 +71,43 @@ function Start-LmStudioServer {
 function Ensure-LmStudioModel {
     $lms = Join-Path $env:USERPROFILE '.lmstudio\bin\lms.exe'
     $model = if ($env:AI_WORKSTATION_LM_STUDIO_MODEL) { $env:AI_WORKSTATION_LM_STUDIO_MODEL } else { 'qwen/qwen3-vl-8b' }
+    $modelKey = if ($env:AI_WORKSTATION_LM_STUDIO_MODEL_KEY) { $env:AI_WORKSTATION_LM_STUDIO_MODEL_KEY } else { $model }
+    $contextLength = if ($env:AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH) { $env:AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH } else { '8192' }
+    $gpuOffload = if ($env:AI_WORKSTATION_LM_STUDIO_GPU_OFFLOAD) { $env:AI_WORKSTATION_LM_STUDIO_GPU_OFFLOAD } else { 'max' }
+    $parallel = if ($env:AI_WORKSTATION_LM_STUDIO_PARALLEL) { $env:AI_WORKSTATION_LM_STUDIO_PARALLEL } else { '1' }
     if (-not (Test-Path -LiteralPath $lms)) {
         return [ordered]@{ loaded = $false; alreadyLoaded = $false; model = $model; error = 'lms.exe was not found' }
     }
     try {
-        $loadedModels = (& $lms ps 2>&1 | Out-String)
+        # /v1/models is a catalog in recent LM Studio versions and may list an
+        # unloaded model. `lms ps` is the authoritative loaded-instance check.
+        # `lms ps` writes its normal "no models" message to stderr. With
+        # ErrorActionPreference=Stop PowerShell used to abort here and skipped loading.
+        try {
+            $loadedModels = (& $lms ps 2>$null | Out-String)
+        }
+        catch {
+            $loadedModels = ''
+        }
         if ($loadedModels -match [regex]::Escape($model)) {
             return [ordered]@{ loaded = $true; alreadyLoaded = $true; model = $model; error = $null }
         }
-        $loadOutput = (& $lms load $model --identifier $model -y 2>&1 | Out-String)
-        $loadOutput | Set-Content -LiteralPath (Join-Path $logRoot 'lm-studio-model-load.log') -Encoding UTF8
-        if ($LASTEXITCODE -ne 0) {
-            return [ordered]@{ loaded = $false; alreadyLoaded = $false; model = $model; error = "Model load exited with code $LASTEXITCODE" }
+        $loadArguments = @('load', $modelKey)
+        if ($model -ne $modelKey) {
+            $loadArguments += @('--identifier', $model)
+        }
+        $loadArguments += @('--gpu', $gpuOffload, '--context-length', $contextLength, '--parallel', $parallel, '-y')
+        $loadStdout = Join-Path $logRoot 'lm-studio-model-load.log'
+        $loadStderr = Join-Path $logRoot 'lm-studio-model-load.error.log'
+        $loadProcess = Start-Process -FilePath $lms `
+            -ArgumentList $loadArguments `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $loadStdout `
+            -RedirectStandardError $loadStderr `
+            -Wait `
+            -PassThru
+        if ($loadProcess.ExitCode -ne 0) {
+            return [ordered]@{ loaded = $false; alreadyLoaded = $false; model = $model; error = "Model load exited with code $($loadProcess.ExitCode)" }
         }
         return [ordered]@{ loaded = $true; alreadyLoaded = $false; model = $model; error = $null }
     }
@@ -122,8 +147,8 @@ if ($secondaryScreens.Count -eq 1) {
     $workerArguments += @('-DisplayDevice', $secondaryScreens[0].DeviceName)
 }
 
-$modelLoad = Ensure-LmStudioModel
 $lmStudio = Start-LmStudioServer
+$modelLoad = Ensure-LmStudioModel
 $worker = Start-BackgroundComponent -Name 'worker' -ScriptPath (Join-Path $PSScriptRoot 'start-worker.ps1') -Port 47731 -ScriptArguments $workerArguments
 $controller = Start-BackgroundComponent -Name 'controller' -ScriptPath (Join-Path $PSScriptRoot 'start-controller.ps1') -Port 47730
 

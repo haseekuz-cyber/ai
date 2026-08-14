@@ -1,4 +1,5 @@
 import { normalizeInputModifiers } from './input-modifiers.mjs';
+import { trajectoryPolicy } from './trajectory.mjs';
 
 const supportedStepTypes = new Set(['click', 'doubleClick', 'scroll', 'drag', 'typeText', 'pressKey']);
 
@@ -12,6 +13,9 @@ export function normalizeSkillId(value) {
 export function validateSkillForWindow(skill, window) {
   if (!skill || skill.schemaVersion !== 1 || !Array.isArray(skill.steps) || skill.steps.length === 0) {
     throw new TypeError('Skill format is invalid.');
+  }
+  if (skill.executionPolicy?.replayable === false) {
+    throw new Error('This recording is semantic observation evidence, not a sequence that may be replayed blindly.');
   }
   if (String(skill.application?.processName).toLowerCase() !== String(window?.processName).toLowerCase()) {
     throw new Error(`This skill was recorded for ${skill.application?.processName || 'another application'}.`);
@@ -105,13 +109,16 @@ export function learnedStepToPointerAction(step, bounds, windowHandle) {
   }
   if (step.type === 'drag') {
     const modifiers = normalizeInputModifiers(step.modifiers, { label: 'learned step modifiers' });
+    const pathPolicy = trajectoryPolicy(step);
+    const trajectory = pathPolicy.trajectory.map((point) => screenPoint(point, bounds));
     return {
       ...common,
       from: screenPoint(step.from, bounds),
       to: screenPoint(step.to, bounds),
       durationMs: Math.min(Math.max(Math.round(Number(step.durationMs) || 350), 50), 5_000),
       button: step.button === 'right' ? 'right' : 'left',
-      ...(modifiers.length > 0 ? { modifiers } : {})
+      ...(modifiers.length > 0 ? { modifiers } : {}),
+      ...(trajectory.length > 0 ? { trajectory } : {})
     };
   }
   if (step.type === 'typeText') {
@@ -140,6 +147,7 @@ export function publicLearnedStep(step) {
     button: step.button ?? null,
     modifiers: step.type === 'drag' ? normalizeInputModifiers(step.modifiers, { label: 'learned step modifiers' }) : [],
     trajectoryMode: step.type === 'drag' ? step.trajectoryMode ?? 'adaptive' : null,
+    expectedResult: step.expectedResult ?? null,
     text: step.type === 'typeText' ? step.text : null,
     key: step.type === 'pressKey' ? step.key : null,
     requiresConfirmation: true

@@ -16,7 +16,11 @@
             <span id="status-text">Подключаю локальную модель…</span>
           </div>
         </div>
-        <button id="safety-toggle" class="quiet danger" type="button">Стоп</button>
+        <div class="top-actions">
+          <button id="anarchy-button" class="quiet anarchy" type="button">Анархичность</button>
+          <button id="safety-toggle" class="quiet danger" type="button">Стоп</button>
+          <button id="full-shutdown-button" class="quiet full-shutdown" type="button">Полное отключение</button>
+        </div>
       </header>
 
       <section class="composer" aria-labelledby="task-title">
@@ -29,6 +33,7 @@
         <textarea id="task-input" rows="4" maxlength="4000" placeholder="Напишите, что нужно сделать…"></textarea>
         <button id="task-button" class="primary" type="button" disabled>Подготовить первый шаг</button>
         <p id="task-status" class="hint">Выберите программу и опишите результат.</p>
+        <div id="jarvis-activity" class="jarvis-activity" aria-label="Краткие отчёты JARVIS" aria-live="polite" hidden></div>
       </section>
 
       <section id="step-card" class="step-card" hidden aria-live="polite">
@@ -36,7 +41,11 @@
         <h1 id="step-reason">Следующий шаг</h1>
         <p id="step-action" class="action-line"></p>
         <p id="step-result" class="expected"></p>
-        <button id="execute-button" class="primary" type="button">Выполнить этот шаг</button>
+        <p id="step-teacher" class="teacher-review"></p>
+        <div class="step-actions">
+          <button id="execute-button" class="primary" type="button">Выполнить этот шаг</button>
+          <button id="teach-step-button" class="quiet" type="button">Передать JARVIS</button>
+        </div>
       </section>
 
       <section id="feedback-card" class="feedback-card" hidden aria-live="polite">
@@ -50,13 +59,26 @@
         </div>
       </section>
 
+      <section id="correction-card" class="correction-card" hidden aria-live="polite">
+        <div>
+          <strong id="correction-title">Исправить именно этот шаг</strong>
+          <p id="correction-detail">Описание необязательно: можно написать короткую подсказку, показать шаг или попросить модель попробовать иначе.</p>
+        </div>
+        <textarea id="correction-input" rows="2" maxlength="1000" placeholder="Например: это холст — здесь нужно тянуть мышь с зажатым Ctrl"></textarea>
+        <div class="correction-actions">
+          <button id="correction-submit" class="primary compact" type="button">Исправить текстом</button>
+          <button id="correction-demo" class="demo-button" type="button">Показать этот шаг</button>
+          <button id="correction-skip" class="quiet" type="button">Попробовать иначе</button>
+        </div>
+      </section>
+
       <section id="demo-panel" class="demo-panel" aria-live="polite">
         <div class="demo-heading">
           <div>
             <strong id="demo-title">Модель не поняла?</strong>
             <span id="demo-status">Покажите выполнение сами — действия станут новым опытом.</span>
           </div>
-          <button id="demo-button" class="demo-button" type="button" disabled>Демонстрация</button>
+          <button id="demo-button" class="demo-button" type="button">Наблюдать и учиться</button>
         </div>
 
         <div id="demo-live" class="demo-live" hidden>
@@ -69,7 +91,72 @@
           </div>
         </div>
         <button id="demo-run-button" class="primary demo-run" type="button" hidden>Выполнить с учётом показа</button>
+        <div id="observation-review" class="observation-review" hidden>
+          <div class="observation-actions">
+            <button id="observation-understood-button" class="quiet" type="button">Что ты понял?</button>
+            <button id="observation-repeat-button" class="primary compact" type="button">Повтори понятое</button>
+          </div>
+          <p id="observation-understanding" class="observation-understanding" hidden></p>
+        </div>
       </section>
+
+      <section id="teacher-chat" class="teacher-chat" aria-live="polite">
+        <div class="teacher-chat-heading">
+          <div>
+            <strong>JARVIS — программист системы</strong>
+            <span>Опишите изменение или вставьте ссылку на YouTube, урок либо документацию. JARVIS сохранит материал отдельно от принципов.</span>
+          </div>
+        </div>
+        <div id="teacher-messages" class="teacher-messages"></div>
+        <div class="teacher-chat-input">
+          <textarea id="teacher-message" rows="2" maxlength="4000" placeholder="Опишите изменение или вставьте ссылку на YouTube, урок либо документацию для обучения JARVIS…"></textarea>
+          <div class="teacher-chat-actions">
+            <label class="attachment-button" for="teacher-screenshot">📎 Скриншот</label>
+            <input id="teacher-screenshot" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+            <span id="teacher-attachment" class="attachment-name">Файл не выбран</span>
+            <button id="teacher-send" class="primary compact" type="button">Перепрограммировать</button>
+          </div>
+        </div>
+        <article id="teacher-task" class="teacher-task" hidden>
+          <strong>Испытание, подготовленное JARVIS</strong>
+          <p id="teacher-task-text"></p>
+          <p id="teacher-task-criteria"></p>
+          <button id="teacher-task-run" class="primary compact" type="button">Испытать на выбранной программе</button>
+        </article>
+        <article id="teacher-proposal" class="teacher-proposal" hidden>
+          <strong>JARVIS подготовил изменение кода</strong>
+          <p id="teacher-proposal-summary"></p>
+          <ul id="teacher-proposal-files"></ul>
+          <p id="teacher-proposal-tests"></p>
+          <button id="teacher-apply" class="primary compact" type="button">Применить проверенное изменение</button>
+        </article>
+      </section>
+
+      <details id="teacher-panel" class="teacher-panel" hidden>
+        <summary>
+          <span><strong>JARVIS</strong><small>проверяет каждый шаг</small></span>
+          <span class="summary-hint">Цели и ценности</span>
+        </summary>
+        <div class="teacher-form">
+          <label for="teacher-name">Имя JARVIS</label>
+          <input id="teacher-name" maxlength="120" />
+          <label for="teacher-mission">Главная цель</label>
+          <textarea id="teacher-mission" rows="3" maxlength="1000"></textarea>
+          <label for="teacher-values">Ценности и правила</label>
+          <textarea id="teacher-values" rows="5" maxlength="2500"></textarea>
+          <button id="teacher-save" class="primary compact" type="button">Сохранить JARVIS</button>
+          <p id="teacher-status" class="principles-help">JARVIS сам проверяет, исследует и исправляет работу агента.</p>
+        </div>
+      </details>
+
+      <details id="principles-panel" class="principles-panel">
+        <summary>
+          <span><strong>Память JARVIS</strong><small id="principles-count">0</small></span>
+          <span class="summary-hint">Основные принципы и обобщённый опыт</span>
+        </summary>
+        <p class="principles-help">Основные принципы защищены. JARVIS отдельно накапливает только переносимые приёмы и ваши общие предпочтения — не текст конкретных заданий.</p>
+        <div id="principles-list" class="principles-list"></div>
+      </details>
     </main>
     <script type="module" src="/app.js"></script>
   </body>

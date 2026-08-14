@@ -15,7 +15,9 @@ export async function moveVirtualPointer(statePath, point, options = {}) {
     x: Math.round(point.x),
     y: Math.round(point.y),
     visible: options.visible !== false,
-    label: options.label || 'AI'
+    label: options.label || 'AI',
+    message: typeof options.message === 'string' ? options.message.trim().slice(0, 320) : '',
+    tone: ['working', 'success', 'warning', 'error'].includes(options.tone) ? options.tone : 'working'
   };
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   const temporaryPath = `${statePath}.${process.pid}.tmp`;

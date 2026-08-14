@@ -20,6 +20,16 @@ function readBoolean(name, fallback = false) {
   return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
 }
 
+function readInteger(name, fallback, { minimum, maximum }) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
 export const config = Object.freeze({
   host: '127.0.0.1',
   controllerPort: readPort('AI_WORKSTATION_CONTROLLER_PORT', 47730),
@@ -30,6 +40,7 @@ export const config = Object.freeze({
   diagnosticsScript: path.resolve(moduleDirectory, '..', 'scripts', 'diagnose.ps1'),
   captureScript: path.resolve(moduleDirectory, '..', 'scripts', 'capture-display.ps1'),
   windowCaptureScript: path.resolve(moduleDirectory, '..', 'scripts', 'capture-window.ps1'),
+  windowObserverScript: path.resolve(moduleDirectory, '..', 'scripts', 'window-observer.ps1'),
   imageRegionScript: path.resolve(moduleDirectory, '..', 'scripts', 'crop-image-region.ps1'),
   telegramBadgeScript: path.resolve(moduleDirectory, '..', 'scripts', 'detect-telegram-badges.ps1'),
   windowMessageScript: path.resolve(moduleDirectory, '..', 'scripts', 'window-message.ps1'),
@@ -43,6 +54,14 @@ export const config = Object.freeze({
   skillsDirectory: process.env.AI_WORKSTATION_SKILLS || path.resolve(moduleDirectory, '..', 'artifacts', 'skills'),
   auditLogPath: process.env.AI_WORKSTATION_AUDIT_LOG || path.resolve(moduleDirectory, '..', 'artifacts', 'logs', 'actions.jsonl'),
   feedbackLogPath: process.env.AI_WORKSTATION_FEEDBACK_LOG || path.resolve(moduleDirectory, '..', 'artifacts', 'learning', 'approved-steps.jsonl'),
+  principlesPath: process.env.AI_WORKSTATION_PRINCIPLES || path.resolve(moduleDirectory, '..', 'artifacts', 'learning', 'principles.json'),
+  teacherProfilePath: process.env.AI_WORKSTATION_TEACHER_PROFILE || path.resolve(moduleDirectory, '..', 'artifacts', 'learning', 'teacher-profile.json'),
+  teacherChatLogPath: process.env.AI_WORKSTATION_TEACHER_CHAT_LOG || path.resolve(moduleDirectory, '..', 'artifacts', 'learning', 'teacher-chat.jsonl'),
+  teacherExperiencesPath: process.env.AI_WORKSTATION_TEACHER_EXPERIENCES || path.resolve(moduleDirectory, '..', 'artifacts', 'learning', 'teacher-experiences.jsonl'),
+  teacherMaterialsPath: process.env.AI_WORKSTATION_TEACHER_MATERIALS || path.resolve(moduleDirectory, '..', 'artifacts', 'learning', 'teacher-materials.jsonl'),
+  teacherChatDirectory: process.env.AI_WORKSTATION_TEACHER_CHAT || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-chat'),
+  teacherSandboxDirectory: process.env.AI_WORKSTATION_TEACHER_SANDBOX || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-sandbox'),
+  teacherBackupDirectory: process.env.AI_WORKSTATION_TEACHER_BACKUPS || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-backups'),
   safetyStatePath: process.env.AI_WORKSTATION_SAFETY_STATE || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety.json'),
   safetyHotkeyReadyPath: process.env.AI_WORKSTATION_SAFETY_HOTKEY_READY || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety-hotkey.ready'),
   assignedDisplay: process.env.AI_WORKSTATION_DISPLAY || null,
@@ -51,5 +70,11 @@ export const config = Object.freeze({
   pointerStatePath: process.env.AI_WORKSTATION_POINTER_STATE || path.resolve(moduleDirectory, '..', 'artifacts', 'virtual-pointer.json'),
   lmStudioBaseUrl: process.env.AI_WORKSTATION_LM_STUDIO_URL || 'http://127.0.0.1:1234',
   lmStudioModel: process.env.AI_WORKSTATION_LM_STUDIO_MODEL || 'qwen/qwen3-vl-8b',
+  teacherModel: process.env.AI_WORKSTATION_TEACHER_MODEL || process.env.AI_WORKSTATION_LM_STUDIO_MODEL || 'qwen/qwen3-vl-8b',
+  teacherFastPathEnabled: readBoolean('AI_WORKSTATION_TEACHER_FAST_PATH', true),
+  miniPlansEnabled: readBoolean('AI_WORKSTATION_MINI_PLANS', true),
+  eventObserverEnabled: readBoolean('AI_WORKSTATION_EVENT_OBSERVER', true),
+  eventObserverIntervalMs: readInteger('AI_WORKSTATION_EVENT_INTERVAL_MS', 1_200, { minimum: 250, maximum: 5_000 }),
+  eventObserverActiveIntervalMs: readInteger('AI_WORKSTATION_EVENT_ACTIVE_INTERVAL_MS', 200, { minimum: 100, maximum: 1_000 }),
   visionEnabled: readBoolean('AI_WORKSTATION_VISION_ENABLED', true)
 });

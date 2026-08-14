@@ -8,6 +8,7 @@
     "controller": "node src/controller.mjs",
     "worker": "node src/worker.mjs",
     "vision:test": "node scripts/check-lmstudio-vision.mjs",
+    "gui:benchmark": "node scripts/benchmark-gui-model.mjs",
     "test": "node --test"
   },
   "engines": {

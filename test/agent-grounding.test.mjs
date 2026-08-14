@@ -390,6 +390,24 @@ test('inaccessible UIA surface blocks unidentified typeText', () => {
   assert.equal(result.abortReason, 'no_editable_target');
 });
 
+test('identified canvas text insertion uses full-window visual refinement instead of no_editable_target', () => {
+  const proposal = makeProposal({
+    type: 'typeText',
+    point: pointForScreen(900, 600),
+    targetHint: { name: 'Document canvas', controlType: 'Canvas' },
+    text: 'Привет'
+  });
+  proposal.reason = 'Написать текст на холсте';
+  proposal.expectedResult = 'Фраза появится на странице';
+  const result = normalizeAndGround({
+    proposal,
+    elements: [makeElement({ controlType: 'Window', capabilities: [] })],
+    windowBounds
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.grounding.reason, 'visual_surface_text_refinement_required');
+});
+
 test('verified visual grounding can execute exactly once', async () => {
   let calls = 0;
   const result = await executeGroundedAction({

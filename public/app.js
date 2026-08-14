@@ -1,31 +1,81 @@
+import { executeSavedSkillStepRequest, prepareSavedSkillRequest } from './skill-flow.js';
+import {
+  createAnarchyRecoveryState,
+  decideAnarchyRecovery,
+  resetAnarchyRecoveryState
+} from './anarchy-recovery.js';
+import {
+  canRepeatSemanticObservation,
+  findLatestSemanticObservation,
+  semanticObservationGoal,
+  summarizeSemanticObservation
+} from './observation-flow.js';
+
 const $ = (selector) => document.querySelector(selector);
 
 const statusDot = $('#status-dot');
 const statusText = $('#status-text');
 const safetyToggle = $('#safety-toggle');
+const fullShutdownButton = $('#full-shutdown-button');
+const anarchyButton = $('#anarchy-button');
 const windowSelect = $('#window-select');
 const taskInput = $('#task-input');
 const taskButton = $('#task-button');
 const taskStatus = $('#task-status');
+const jarvisActivity = $('#jarvis-activity');
 const stepCard = $('#step-card');
 const stepNumber = $('#step-number');
 const stepReason = $('#step-reason');
 const stepAction = $('#step-action');
 const stepResult = $('#step-result');
+const stepTeacher = $('#step-teacher');
 const executeButton = $('#execute-button');
+const teachStepButton = $('#teach-step-button');
 const feedbackCard = $('#feedback-card');
 const feedbackTitle = $('#feedback-title');
 const feedbackDetail = $('#feedback-detail');
 const positiveButton = $('#positive-button');
 const negativeButton = $('#negative-button');
+const correctionCard = $('#correction-card');
+const correctionTitle = $('#correction-title');
+const correctionDetail = $('#correction-detail');
+const correctionInput = $('#correction-input');
+const correctionSubmit = $('#correction-submit');
+const correctionDemo = $('#correction-demo');
+const correctionSkip = $('#correction-skip');
 const demoButton = $('#demo-button');
 const demoRunButton = $('#demo-run-button');
+const observationReview = $('#observation-review');
+const observationUnderstoodButton = $('#observation-understood-button');
+const observationRepeatButton = $('#observation-repeat-button');
+const observationUnderstanding = $('#observation-understanding');
 const demoTitle = $('#demo-title');
 const demoStatus = $('#demo-status');
 const demoLive = $('#demo-live');
 const traceCanvas = $('#trace-canvas');
 const eventCount = $('#event-count');
 const keys = $('#keys');
+const principlesCount = $('#principles-count');
+const principlesList = $('#principles-list');
+const teacherName = $('#teacher-name');
+const teacherMission = $('#teacher-mission');
+const teacherValues = $('#teacher-values');
+const teacherSave = $('#teacher-save');
+const teacherStatus = $('#teacher-status');
+const teacherMessages = $('#teacher-messages');
+const teacherMessage = $('#teacher-message');
+const teacherScreenshot = $('#teacher-screenshot');
+const teacherAttachment = $('#teacher-attachment');
+const teacherSend = $('#teacher-send');
+const teacherProposal = $('#teacher-proposal');
+const teacherProposalSummary = $('#teacher-proposal-summary');
+const teacherProposalFiles = $('#teacher-proposal-files');
+const teacherProposalTests = $('#teacher-proposal-tests');
+const teacherApply = $('#teacher-apply');
+const teacherTask = $('#teacher-task');
+const teacherTaskText = $('#teacher-task-text');
+const teacherTaskCriteria = $('#teacher-task-criteria');
+const teacherTaskRun = $('#teacher-task-run');
 
 let selectedWindowHandle = null;
 let currentMission = null;
@@ -33,11 +83,127 @@ let currentPlan = null;
 let completedStep = null;
 let currentSkillRun = null;
 let latestDemonstratedSkillId = localStorage.getItem('ai-latest-skill-id') || null;
+let latestObservedSkill = null;
 let windowCatalog = [];
 let teachingSession = null;
 let teachingTimer = null;
+let teachingRequested = false;
 let paused = false;
 let busy = false;
+let pendingCorrection = null;
+let stepTeachingContext = null;
+let correctionResume = null;
+let anarchyMode = false;
+let anarchyResumeGoal = null;
+let semanticReplayMode = false;
+let anarchyRunId = 0;
+let anarchyStepCount = 0;
+let anarchyTimer = null;
+let anarchyAwaitingCorrection = false;
+let anarchyRecoveryState = createAnarchyRecoveryState();
+let teacherProfileLoaded = false;
+let teacherBusy = false;
+let currentTeacherProposal = null;
+let currentTeacherTask = null;
+let fullShutdownActive = false;
+
+const ANARCHY_INSTRUCTION = 'Автономная учебная сессия JARVIS: забудь текущую и предыдущую пользовательскую задачу. JARVIS сам выбирает небольшую обратимую гипотезу о свежем интерфейсе, даёт рабочему агенту действия, проверяет результат и сохраняет только переносимый опыт. Не отправляй сообщения и формы, не публикуй, не удаляй, не покупай и не меняй настройки системы или аккаунта. Если безопасной проверяемой гипотезы нет — заверши сессию.';
+
+function clearAnarchyTimer() {
+  if (anarchyTimer) clearTimeout(anarchyTimer);
+  anarchyTimer = null;
+}
+
+function stopAnarchyLoop() {
+  clearAnarchyTimer();
+  anarchyRunId += 1;
+  anarchyMode = false;
+  anarchyResumeGoal = null;
+  semanticReplayMode = false;
+  anarchyAwaitingCorrection = false;
+  anarchyRecoveryState = createAnarchyRecoveryState();
+}
+
+function reportJarvis(kind, message) {
+  if (!jarvisActivity) return;
+  const line = document.createElement('p');
+  const label = document.createElement('strong');
+  label.textContent = `${kind}: `;
+  line.append(label, document.createTextNode(String(message || '').replace(/\s+/g, ' ').trim()));
+  jarvisActivity.prepend(line);
+  while (jarvisActivity.children.length > 4) jarvisActivity.lastElementChild.remove();
+  jarvisActivity.hidden = false;
+}
+
+function scheduleAnarchyContinuation(operation, delayMs = 350) {
+  if (!anarchyMode || paused || anarchyAwaitingCorrection) return;
+  clearAnarchyTimer();
+  const runId = anarchyRunId;
+  anarchyTimer = setTimeout(async () => {
+    anarchyTimer = null;
+    if (!anarchyMode || paused || runId !== anarchyRunId) return;
+    if (operation === 'execute') await executeStep({ autonomous: true, runId });
+    else await planNextStep(false, runId);
+  }, delayMs);
+}
+
+function finishAnarchySession(message, { error = false } = {}) {
+  stopAnarchyLoop();
+  currentMission = null;
+  currentPlan = null;
+  resetFeedbackView();
+  resetStepView();
+  setStatus(message, { error });
+  updateControls();
+}
+
+async function recoverAnarchy(message, detail = '', errorInfo = {}) {
+  if (!anarchyMode) return;
+  currentPlan = null;
+  resetStepView();
+  resetFeedbackView();
+  const missionId = currentMission?.missionId || null;
+  const decision = decideAnarchyRecovery(anarchyRecoveryState, {
+    missionId,
+    errorCode: errorInfo.errorCode,
+    abortReason: errorInfo.abortReason,
+    message: detail || message
+  });
+  anarchyRecoveryState = decision.state;
+  setStatus(`${message}. ${decision.report}`);
+  reportJarvis('Восстановление', `${detail || message}. ${decision.report}`);
+  if (missionId && decision.shouldRecordCorrection) {
+    try {
+      const corrected = await api('/api/missions/correct-step', {
+        method: 'POST',
+        body: JSON.stringify({
+          missionId: currentMission.missionId,
+          correction: `${detail || message}. Не останавливай локальное обучение и не повторяй тот же способ вслепую. Пересними экран, проверь обязательные условия, закрой безопасным способом мешающее окно, если оно появилось, используй накопленный опыт и публичную документацию, затем проверь другую гипотезу.`
+        })
+      });
+      currentMission = corrected.mission || currentMission;
+    } catch (error) {
+      if (error.body?.error === 'mission_not_found' || error.body?.error === 'mission_step_limit') currentMission = null;
+    }
+  }
+  if (decision.action === 'new_mission') {
+    await cancelMission();
+    anarchyResumeGoal = null;
+  }
+  if (decision.action === 'needs_user') {
+    clearAnarchyTimer();
+    anarchyAwaitingCorrection = true;
+    showCorrection({
+      source: 'mission',
+      missionId,
+      planningFailure: true,
+      proposal: errorInfo.proposal || null
+    }, decision.report);
+    updateControls();
+    return;
+  }
+  scheduleAnarchyContinuation('plan', decision.delayMs);
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -80,6 +246,186 @@ function resetStepView() {
   currentPlan = null;
   stepCard.hidden = true;
   executeButton.disabled = false;
+  stepTeacher.textContent = '';
+}
+
+function renderTeacherProfile(body) {
+  if (!body?.profile || teacherProfileLoaded) return;
+  teacherName.value = body.profile.name || '';
+  teacherMission.value = body.profile.mission || '';
+  teacherValues.value = body.profile.values || '';
+  teacherStatus.textContent = `JARVIS активен на базе ${body.model || 'локальной модели'}. Он сам проверяет свежий экран, исследует и исправляет план.`;
+  teacherProfileLoaded = true;
+}
+
+function appendTeacherMessage(role, text, { screenshot = false } = {}) {
+  const item = document.createElement('article');
+  item.className = `teacher-message ${role === 'user' ? 'user' : 'assistant'}`;
+  const author = document.createElement('strong');
+  author.textContent = role === 'user' ? 'Вы' : 'JARVIS';
+  const content = document.createElement('p');
+  content.textContent = text;
+  item.append(author, content);
+  if (screenshot) {
+    const badge = document.createElement('span');
+    badge.className = 'screenshot-badge';
+    badge.textContent = '📷 скриншот';
+    item.append(badge);
+  }
+  teacherMessages.append(item);
+  teacherMessages.scrollTop = teacherMessages.scrollHeight;
+}
+
+async function refreshTeacherChat() {
+  try {
+    const body = await api('/api/teacher/chat');
+    teacherMessages.replaceChildren();
+    for (const message of body.history || []) {
+      appendTeacherMessage(message.role, message.text, { screenshot: Boolean(message.screenshotPath) });
+    }
+    if (!(body.history || []).length) {
+      appendTeacherMessage('assistant', 'Я JARVIS — программист этой системы. Опишите изменение рабочего ИИ, моей логики или админ-панели. Я найду нужный код, подготовлю минимальную правку, проверю её в отдельной копии и установлю только после успешных тестов.');
+    }
+  } catch (error) {
+    appendTeacherMessage('assistant', `Чат пока недоступен: ${error.message}`);
+  }
+}
+
+async function screenshotToPngDataUrl(file) {
+  if (!file) return '';
+  if (file.size > 8 * 1024 * 1024) throw new Error('Скриншот должен быть меньше 8 МБ.');
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return canvas.toDataURL('image/png');
+}
+
+function showTeacherProposal(proposal) {
+  currentTeacherProposal = proposal;
+  teacherProposalSummary.textContent = proposal.summary || 'Небольшое изменение проекта.';
+  teacherProposalFiles.replaceChildren();
+  for (const file of proposal.files || []) {
+    const item = document.createElement('li');
+    item.textContent = `${file.operation === 'create' ? 'Создать' : 'Изменить'} ${file.path}${file.reason ? ` — ${file.reason}` : ''}`;
+    teacherProposalFiles.append(item);
+  }
+  teacherProposalTests.textContent = proposal.sandbox?.passed
+    ? 'Проверка в отдельной копии: все тесты прошли.'
+    : `Проверка в отдельной копии не прошла. Код применить нельзя.${proposal.sandbox?.output ? ` ${proposal.sandbox.output.slice(-500)}` : ''}`;
+  teacherApply.disabled = !proposal.canApply;
+  teacherProposal.hidden = false;
+}
+
+function showTeacherTask(task) {
+  currentTeacherTask = task;
+  teacherTaskText.textContent = task.instruction;
+  teacherTaskCriteria.textContent = task.successCriteria
+    ? `Критерий успеха: ${task.successCriteria}`
+    : 'Результат будет проверен по свежему экрану.';
+  teacherTaskRun.disabled = !task.windowHandle;
+  teacherTask.hidden = false;
+}
+
+async function sendTeacherMessage() {
+  const message = teacherMessage.value.trim();
+  const file = teacherScreenshot.files?.[0] || null;
+  if ((!message && !file) || teacherBusy) return;
+  teacherBusy = true;
+  teacherSend.disabled = true;
+  teacherSend.textContent = 'JARVIS работает…';
+  teacherProposal.hidden = true;
+  teacherTask.hidden = true;
+  currentTeacherProposal = null;
+  currentTeacherTask = null;
+  try {
+    const screenshotDataUrl = await screenshotToPngDataUrl(file);
+    appendTeacherMessage('user', message || 'Проанализируй этот скриншот.', { screenshot: Boolean(file) });
+    teacherMessage.value = '';
+    const body = await api('/api/teacher/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        screenshotDataUrl,
+        mode: 'jarvis',
+        useInternet: true,
+        windowHandle: selectedWindowHandle,
+        currentTask: taskInput.value.trim()
+      })
+    });
+    appendTeacherMessage('assistant', body.reply);
+    if (body.learningUpdates?.length) {
+      appendTeacherMessage('assistant', `JARVIS сохранил обобщённый опыт: ${body.learningUpdates.map((item) => item.name).join(', ')}.`);
+      await refreshSystemStatus();
+    }
+    if (body.rejectedLearning?.length) {
+      appendTeacherMessage('assistant', 'Конкретное задание не записано в долговременную память: JARVIS не нашёл в нём достаточно обобщённого приёма или предпочтения.');
+    }
+    if (body.research?.sources?.length) {
+      appendTeacherMessage('assistant', `Использованы публичные источники:\n${body.research.sources.map((source) => `${source.title || 'Источник'} — ${source.url}`).join('\n')}`);
+    } else if (body.research?.enabled && body.research?.error) {
+      appendTeacherMessage('assistant', `Интернет-поиск не сработал: ${body.research.error}. Ответ построен без него.`);
+    }
+    if (body.learningMaterials?.length) {
+      const saved = body.learningMaterials.filter((item) => item.saved);
+      const withoutTranscript = body.learningMaterials.filter((item) => item.sourceType === 'youtube' && item.transcriptAvailable === false);
+      if (saved.length) appendTeacherMessage('assistant', `Материал сохранён в библиотеку JARVIS: ${saved.map((item) => item.title || item.url).join(', ')}.`);
+      if (withoutTranscript.length) appendTeacherMessage('assistant', 'У этого YouTube-видео не удалось получить субтитры. Ссылка сохранена, но для точного обучения добавьте в сообщение конспект или текст субтитров.');
+    }
+    if (body.codeApplied?.applied) appendTeacherMessage('assistant', 'Проверенная правка кода установлена с резервной копией и полным тестированием.');
+    if (body.agentTask) showTeacherTask(body.agentTask);
+    if (body.codeProposal) showTeacherProposal(body.codeProposal);
+    if (body.proposalError) appendTeacherMessage('assistant', `Изменение кода не принято системой безопасности: ${body.proposalError}`);
+    teacherScreenshot.value = '';
+    teacherAttachment.textContent = 'Файл не выбран';
+  } catch (error) {
+    appendTeacherMessage('assistant', `Не удалось ответить: ${error.message}`);
+  } finally {
+    teacherBusy = false;
+    teacherSend.disabled = false;
+    teacherSend.textContent = 'Перепрограммировать';
+  }
+}
+
+async function runTeacherTask() {
+  if (!currentTeacherTask?.instruction || !currentTeacherTask.windowHandle || busy) return;
+  await cancelMission();
+  resetFeedbackView();
+  hideCorrection();
+  selectedWindowHandle = Number(currentTeacherTask.windowHandle);
+  windowSelect.value = String(selectedWindowHandle);
+  localStorage.setItem('ai-window-handle', String(selectedWindowHandle));
+  taskInput.value = currentTeacherTask.instruction;
+  anarchyMode = false;
+  teacherTask.hidden = true;
+  currentTeacherTask = null;
+  updateControls();
+  await planNextStep();
+}
+
+async function applyTeacherCodeProposal() {
+  if (!currentTeacherProposal?.proposalId || teacherBusy) return;
+  teacherBusy = true;
+  teacherApply.disabled = true;
+  try {
+    const body = await api('/api/teacher/code/apply', {
+      method: 'POST',
+      body: JSON.stringify({ proposalId: currentTeacherProposal.proposalId, confirmed: true })
+    });
+    appendTeacherMessage('assistant', body.applied
+      ? `Изменение применено, полный набор тестов прошёл. Изменены файлы: ${body.files.join(', ')}. Для серверного кода перезапустите приложение.`
+      : 'Изменение не прошло тесты и было автоматически отменено.');
+    teacherProposal.hidden = true;
+    currentTeacherProposal = null;
+  } catch (error) {
+    appendTeacherMessage('assistant', `Изменение не применено: ${error.message}`);
+    teacherApply.disabled = false;
+  } finally {
+    teacherBusy = false;
+  }
 }
 
 function resetFeedbackView() {
@@ -91,14 +437,163 @@ function resetFeedbackView() {
   negativeButton.textContent = '👎';
 }
 
+function renderPrinciples(principles = [], experiences = []) {
+  principlesCount.textContent = String(principles.length + experiences.length);
+  principlesList.replaceChildren();
+  if (!principles.length) {
+    const empty = document.createElement('p');
+    empty.className = 'principles-empty';
+    empty.textContent = 'Принципы появятся после ваших оценок 👍 и 👎.';
+    principlesList.append(empty);
+    return;
+  }
+  for (const principle of principles) {
+    const item = document.createElement('article');
+    item.className = 'principle-item';
+    const name = document.createElement('input');
+    name.value = principle.name || 'Принцип интерфейса';
+    name.maxLength = 120;
+    name.setAttribute('aria-label', 'Название принципа');
+    const description = document.createElement('textarea');
+    description.value = principle.description || principle.statement || '';
+    description.maxLength = 1200;
+    description.setAttribute('aria-label', 'Описание принципа');
+    if (principle.protected) {
+      name.readOnly = true;
+      description.readOnly = true;
+      item.classList.add('core-principle');
+    }
+    const meta = document.createElement('span');
+    meta.className = 'principle-meta';
+    meta.textContent = `👍 ${principle.positive || 0} · 👎 ${principle.negative || 0} · программ: ${principle.applications?.length || 0}`;
+    const actions = document.createElement('div');
+    actions.className = 'principle-actions';
+    const save = document.createElement('button');
+    save.className = 'primary compact';
+    save.type = 'button';
+    save.textContent = 'Сохранить';
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        await api('/api/knowledge/principles/update', {
+          method: 'POST',
+          body: JSON.stringify({
+            principleId: principle.principleId,
+            name: name.value.trim(),
+            description: description.value.trim()
+          })
+        });
+        setStatus(`Принцип «${name.value.trim()}» обновлён.`);
+        await refreshSystemStatus();
+      } catch (error) {
+        setStatus(`Не удалось обновить принцип: ${error.message}`, { error: true });
+      } finally {
+        save.disabled = false;
+      }
+    });
+    const remove = document.createElement('button');
+    remove.className = 'quiet principle-delete';
+    remove.type = 'button';
+    remove.textContent = 'Удалить';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`Удалить принцип «${name.value.trim()}» из долговременной памяти?`)) return;
+      remove.disabled = true;
+      try {
+        await api('/api/knowledge/principles/delete', {
+          method: 'POST',
+          body: JSON.stringify({ principleId: principle.principleId })
+        });
+        setStatus(`Принцип «${name.value.trim()}» удалён.`);
+        await refreshSystemStatus();
+      } catch (error) {
+        setStatus(`Не удалось удалить принцип: ${error.message}`, { error: true });
+        remove.disabled = false;
+      }
+    });
+    if (!principle.protected) actions.append(save, remove);
+    meta.textContent = principle.protected
+      ? 'Основной защищённый принцип JARVIS'
+      : meta.textContent;
+    item.append(name, description, meta);
+    if (!principle.protected) item.append(actions);
+    principlesList.append(item);
+  }
+  if (experiences.length) {
+    const heading = document.createElement('strong');
+    heading.className = 'knowledge-heading';
+    heading.textContent = 'Обобщённый опыт и предпочтения';
+    principlesList.append(heading);
+    for (const experience of experiences) {
+      const item = document.createElement('article');
+      item.className = 'principle-item learned-experience';
+      const name = document.createElement('strong');
+      name.textContent = experience.name;
+      const description = document.createElement('p');
+      description.textContent = experience.description;
+      const meta = document.createElement('span');
+      meta.className = 'principle-meta';
+      const typeLabels = { technique: 'Приём', preference: 'Ваше предпочтение', lesson: 'Урок' };
+      meta.textContent = `${typeLabels[experience.type] || 'Опыт'} · ${experience.scope === 'selected_application' ? experience.application?.processName || 'выбранная программа' : 'универсально'}`;
+      item.append(name, description, meta);
+      principlesList.append(item);
+    }
+  }
+}
+
+function hideCorrection() {
+  pendingCorrection = null;
+  correctionCard.hidden = true;
+  correctionInput.value = '';
+}
+
+function showCorrection(context, detail = '') {
+  pendingCorrection = context;
+  correctionTitle.textContent = context?.planningFailure
+    ? 'Модель просит показать или уточнить этот шаг'
+    : 'Исправить именно этот шаг';
+  correctionDetail.textContent = detail || 'Описание необязательно: можно написать короткую подсказку, показать только этот шаг или попросить модель попробовать иначе.';
+  correctionCard.hidden = false;
+  correctionInput.focus();
+}
+
+function observationMatchesSelectedWindow() {
+  const selected = windowCatalog.find((item) => Number(item.nativeWindowHandle) === selectedWindowHandle);
+  return Boolean(selected && latestObservedSkill &&
+    String(selected.processName || '').toLowerCase() === String(latestObservedSkill.application?.processName || '').toLowerCase());
+}
+
 function updateControls() {
+  if (fullShutdownActive) {
+    document.querySelectorAll('button, textarea, select, input').forEach((element) => {
+      element.disabled = true;
+    });
+    return;
+  }
   const hasInput = Boolean(selectedWindowHandle && taskInput.value.trim());
-  taskButton.disabled = busy || paused || Boolean(teachingSession) || Boolean(currentSkillRun) || !hasInput || Boolean(currentPlan) || Boolean(completedStep);
-  demoButton.disabled = busy || !hasInput;
+  taskButton.disabled = busy || paused || anarchyMode || Boolean(teachingSession) || Boolean(currentSkillRun) || !hasInput || Boolean(currentPlan) || Boolean(completedStep);
+  // Passive learning is observation-only, so it remains available while execution is paused.
+  demoButton.disabled = teachingRequested || (busy && !teachingSession) || Boolean(currentSkillRun);
   demoRunButton.disabled = busy || paused || !selectedWindowHandle || !latestDemonstratedSkillId || Boolean(teachingSession) || Boolean(currentPlan) || Boolean(completedStep) || Boolean(currentSkillRun);
-  windowSelect.disabled = busy || Boolean(teachingSession) || Boolean(currentSkillRun);
-  taskInput.disabled = busy || Boolean(teachingSession) || Boolean(currentSkillRun);
+  observationUnderstoodButton.disabled = busy || !latestObservedSkill || Boolean(teachingSession);
+  observationRepeatButton.disabled = busy || paused || !observationMatchesSelectedWindow() || !canRepeatSemanticObservation(latestObservedSkill) || Boolean(teachingSession) || Boolean(currentPlan) || Boolean(completedStep) || Boolean(currentSkillRun);
+  windowSelect.disabled = busy || anarchyMode || Boolean(teachingSession) || Boolean(currentSkillRun);
+  taskInput.disabled = busy || anarchyMode || Boolean(teachingSession) || Boolean(currentSkillRun);
   executeButton.disabled = busy || paused || (!currentPlan && !currentSkillRun?.currentStep);
+  teachStepButton.disabled = busy || (!currentPlan && !currentSkillRun?.currentStep);
+  correctionSubmit.disabled = busy || !pendingCorrection || !correctionInput.value.trim();
+  correctionDemo.disabled = busy || !pendingCorrection || !selectedWindowHandle;
+  correctionSkip.disabled = busy || !pendingCorrection;
+  anarchyButton.disabled = anarchyMode
+    ? false
+    : busy || paused || !selectedWindowHandle || Boolean(teachingSession) || Boolean(currentSkillRun);
+  anarchyButton.classList.toggle('active', anarchyMode);
+  anarchyButton.textContent = anarchyAwaitingCorrection
+    ? 'Продолжить свободу'
+    : semanticReplayMode ? 'Остановить повтор' : anarchyMode ? 'Остановить свободу' : 'Анархичность';
+  if (teachingRequested && !busy && !teachingSession) {
+    teachingRequested = false;
+    setTimeout(() => toggleTeaching(), 0);
+  }
 }
 
 async function cancelMission() {
@@ -127,14 +622,15 @@ async function cancelSkillRun() {
 
 async function refreshLatestDemonstration() {
   const selected = windowCatalog.find((item) => Number(item.nativeWindowHandle) === selectedWindowHandle);
-  if (!selected) {
-    latestDemonstratedSkillId = null;
-    demoRunButton.hidden = true;
-    return;
-  }
   try {
     const body = await api('/api/skills');
-    const skill = (body.skills || []).find((item) => item.application?.processName === selected.processName);
+    const skills = body.skills || [];
+    const skill = selected
+      ? skills.find((item) =>
+          item.executionPolicy?.replayable !== false && item.application?.processName === selected.processName)
+      : null;
+    latestObservedSkill = (selected ? findLatestSemanticObservation(skills, selected.processName) : null) ||
+      findLatestSemanticObservation(skills);
     latestDemonstratedSkillId = skill?.skillId || null;
     if (latestDemonstratedSkillId) {
       localStorage.setItem('ai-latest-skill-id', latestDemonstratedSkillId);
@@ -145,7 +641,31 @@ async function refreshLatestDemonstration() {
     } else {
       demoRunButton.hidden = true;
     }
+    observationReview.hidden = !latestObservedSkill;
+    if (latestObservedSkill) {
+      localStorage.setItem('ai-latest-observation-id', latestObservedSkill.skillId);
+      if (demoTitle.textContent === 'Модель не поняла?') {
+        demoStatus.textContent = canRepeatSemanticObservation(latestObservedSkill) && observationMatchesSelectedWindow()
+          ? 'Последнее наблюдение разобрано. Можно спросить, что понято, или попросить модель повторить смысл на свежем экране.'
+          : canRepeatSemanticObservation(latestObservedSkill)
+            ? `Последнее наблюдение относится к программе ${latestObservedSkill.application?.processName || 'неизвестно'}. Сначала проверьте «Что ты понял?», затем выберите эту программу для повтора.`
+          : 'Последнее наблюдение сохранено, но смысл недостаточно ясен для самостоятельного повтора. Нажмите «Что ты понял?», чтобы увидеть причину.';
+      }
+    }
   } catch { }
+}
+
+async function watchSelectedWindow() {
+  if (!selectedWindowHandle) return null;
+  try {
+    return await api('/api/observation/watch', {
+      method: 'POST',
+      body: JSON.stringify({ windowHandle: selectedWindowHandle })
+    });
+  } catch (error) {
+    console.warn('Event observer could not watch the selected window:', error);
+    return null;
+  }
 }
 
 async function scanWindows() {
@@ -173,6 +693,7 @@ async function scanWindows() {
       windowSelect.value = String(windows[0].nativeWindowHandle);
     }
     selectedWindowHandle = Number(windowSelect.value) || null;
+    await watchSelectedWindow();
     await refreshLatestDemonstration();
   } catch (error) {
     windowSelect.replaceChildren(new Option('Не удалось получить список программ', ''));
@@ -182,12 +703,28 @@ async function scanWindows() {
 }
 
 async function refreshSystemStatus() {
+  if (fullShutdownActive) return;
   try {
-    const body = await api('/api/status');
+    const [body, knowledge, teacher] = await Promise.all([
+      api('/api/status'),
+      api('/api/knowledge/status').catch(() => ({ principleCount: 0 })),
+      api('/api/teacher/profile').catch(() => null)
+    ]);
     paused = body.worker?.safety?.paused === true;
     const ready = body.independentControl?.ready === true;
+    const eventStream = body.worker?.observation?.eventStream;
+    const interfaceMap = body.worker?.observation?.interfaceMap;
+    const observationLabel = eventStream?.status === 'observing'
+      ? `наблюдение ${eventStream.intervalMs} мс · кадров памяти: ${eventStream.temporalKeyframes || 0} · элементов: ${interfaceMap?.elementCount || 0}`
+      : 'наблюдение ожидает окно';
     statusDot.className = `status-dot ${ready ? 'ready' : 'error'}`;
-    statusText.textContent = paused ? 'Действия приостановлены' : ready ? 'Локальная модель готова' : 'Управление пока не готово';
+    statusText.textContent = paused
+      ? 'Действия приостановлены'
+      : ready
+        ? `JARVIS готов · ${observationLabel} · принципы: ${knowledge.principleCount || 0} · опыт: ${knowledge.teacherExperienceCount || 0}`
+        : 'Управление пока не готово';
+    renderPrinciples(knowledge.principles || [], knowledge.teacherExperiences || []);
+    renderTeacherProfile(teacher);
     safetyToggle.textContent = paused ? 'Продолжить' : 'Стоп';
     safetyToggle.classList.toggle('resume', paused);
   } catch (error) {
@@ -199,14 +736,36 @@ async function refreshSystemStatus() {
 }
 
 function showPlan(body) {
+  hideCorrection();
   currentPlan = body;
-  stepNumber.textContent = `Шаг ${(body.mission?.stepCount || 0) + 1}`;
+  const autonomousGoal = body.mission?.autonomousGoal || null;
+  stepNumber.textContent = anarchyMode
+    ? `Свободный режим · шаг ${(body.mission?.stepCount || 0) + 1}`
+    : `Шаг ${(body.mission?.stepCount || 0) + 1}`;
   stepReason.textContent = body.proposal?.reason || 'Следующее действие';
   stepAction.textContent = actionLabel(body.proposal?.action);
   stepResult.textContent = body.proposal?.expectedResult ? `Ожидаемый результат: ${body.proposal.expectedResult}` : '';
+  const miniPlan = body.mission?.miniPlan;
+  if (body.miniPlanStep) {
+    stepTeacher.textContent = `Мини-план ${body.miniPlanStep.index + 1}/${body.miniPlanStep.total}: цель заново найдена на свежем экране, новый вызов Planner не потребовался.`;
+  } else if (miniPlan?.remaining) {
+    stepTeacher.textContent = `Подготовлен защищённый мини-план: ещё ${miniPlan.remaining} действия. Перед каждым Worker заново проверит экран и цель.`;
+  } else {
+    stepTeacher.textContent = body.teacherRevisionCount
+      ? `JARVIS самостоятельно исправил план и одобрил этот вариант: ${body.teacherReview?.reason || 'шаг соответствует цели.'}`
+      : `JARVIS проверил и одобрил: ${body.teacherReview?.reason || 'это следующий полезный шаг.'}`;
+  }
   stepCard.hidden = false;
-  setStatus('Модель предложила один шаг. Нажатие кнопки ниже — его подтверждение.');
+  executeButton.hidden = anarchyMode;
+  teachStepButton.hidden = anarchyMode;
+  setStatus(anarchyMode
+    ? `JARVIS проверяет гипотезу: ${autonomousGoal?.goal || 'небольшой обратимый опыт'}. Подтверждение не требуется: после свежего снимка результат будет проверен автоматически.`
+    : 'Модель предложила один шаг. Нажатие кнопки ниже — его подтверждение.');
+  if (anarchyMode) {
+    reportJarvis('План', `${autonomousGoal?.goal || 'Локальный опыт'}. Действие: ${actionLabel(body.proposal?.action)}.`);
+  }
   updateControls();
+  if (anarchyMode) scheduleAnarchyContinuation('execute');
 }
 
 function showLearnedStep(step) {
@@ -222,33 +781,59 @@ function showLearnedStep(step) {
   updateControls();
 }
 
-async function planNextStep(retriedAfterRestart = false) {
-  const instruction = taskInput.value.trim();
+async function planNextStep(retriedAfterRestart = false, expectedAnarchyRunId = null) {
+  const instruction = anarchyMode ? ANARCHY_INSTRUCTION : taskInput.value.trim();
   if (!selectedWindowHandle || !instruction || busy) return;
+  const planningAnarchyRunId = anarchyMode ? (expectedAnarchyRunId ?? anarchyRunId) : null;
   busy = true;
   resetStepView();
-  setStatus('Модель изучает свежий интерфейс и готовит один шаг…');
+  setStatus(semanticReplayMode
+    ? 'JARVIS заново смотрит на экран и готовит повтор понятого результата…'
+    : anarchyMode
+    ? 'Свободный режим изучает свежий экран и придумывает новую локальную цель…'
+    : 'Модель изучает свежий интерфейс и готовит один шаг…');
   updateControls();
   try {
     if (!currentMission?.missionId || currentMission.instruction !== instruction) {
       await cancelMission();
       const started = await api('/api/missions', {
         method: 'POST',
-        body: JSON.stringify({ windowHandle: selectedWindowHandle, instruction, maxSteps: 30 })
+        body: JSON.stringify({
+          windowHandle: selectedWindowHandle,
+          instruction,
+          maxSteps: anarchyMode ? 6 : 30,
+          mode: anarchyMode ? 'anarchy' : 'guided',
+          autonomousGoal: anarchyMode ? anarchyResumeGoal : null
+        })
       });
+      if (planningAnarchyRunId !== null && (!anarchyMode || planningAnarchyRunId !== anarchyRunId)) return;
       currentMission = started.mission;
+      anarchyResumeGoal = null;
     }
     const body = await api('/api/missions/plan-next', {
       method: 'POST',
       body: JSON.stringify({ missionId: currentMission.missionId })
     });
+    if (planningAnarchyRunId !== null && (!anarchyMode || planningAnarchyRunId !== anarchyRunId)) return;
     currentMission = body.mission;
+    if (anarchyMode) anarchyRecoveryState = resetAnarchyRecoveryState(currentMission?.missionId || null);
     if (body.proposal?.action?.type === 'done' || body.mission?.status === 'complete') {
       currentMission = null;
-      taskButton.textContent = 'Начать новую задачу';
-      setStatus('Задача завершена. Проверьте итог в программе.');
+      if (anarchyMode) {
+        if (semanticReplayMode) {
+          finishAnarchySession('Повтор понятого завершён. JARVIS выполнил цель по свежему экрану, а не воспроизвёл старые координаты. Проверьте итог в программе.');
+        } else {
+          anarchyResumeGoal = null;
+          setStatus('Гипотеза проверена. JARVIS выбирает следующий безопасный опыт по свежему экрану…');
+          scheduleAnarchyContinuation('plan');
+        }
+      } else {
+        taskButton.textContent = 'Начать новую задачу';
+        setStatus('Задача завершена. Проверьте итог в программе.');
+      }
     } else if (body.policy?.allowExecution === false) {
-      setStatus(`Шаг остановлен безопасностью: ${body.policy.reason}`, { error: true });
+      if (anarchyMode) await recoverAnarchy('Предложенный способ отклонён', body.policy.reason, { errorCode: 'policy_rejected' });
+      else setStatus(`Шаг остановлен безопасностью: ${body.policy.reason}`, { error: true });
     } else {
       showPlan(body);
     }
@@ -257,11 +842,64 @@ async function planNextStep(retriedAfterRestart = false) {
       currentMission = null;
       busy = false;
       updateControls();
-      return await planNextStep(true);
+      return await planNextStep(true, planningAnarchyRunId);
+    }
+    if (anarchyMode && error.body?.error === 'mission_step_limit') {
+      currentMission = null;
+      anarchyResumeGoal = null;
+      if (semanticReplayMode) {
+        finishAnarchySession('Повтор понятого остановлен после лимита шагов: результат ещё не подтверждён. Можно показать более короткий пример.', { error: true });
+      } else {
+        setStatus('Лимит одной гипотезы достигнут. JARVIS начинает другой безопасный опыт…');
+        scheduleAnarchyContinuation('plan');
+      }
+      return;
     }
     const suggestion = error.body?.abortReason === 'visual_target_not_verified'
-      ? ' Модель не уверена — нажмите «Демонстрация» и покажите правильный способ.'
+      ? ' Модель не уверена: уточните или покажите только этот шаг ниже.'
       : '';
+    if (error.body?.abortReason === 'autonomous_goal_not_grounded') {
+      currentMission = error.body?.mission || currentMission;
+      await recoverAnarchy('Первая гипотеза оказалась недостаточно ясной', error.message, {
+        errorCode: error.body?.error,
+        abortReason: error.body?.abortReason
+      });
+      return;
+    }
+    if (['visual_target_not_verified', 'successful_action_repeated'].includes(error.body?.abortReason)) {
+      currentMission = error.body?.mission || currentMission;
+      showCorrection({
+        source: 'mission',
+        missionId: currentMission?.missionId || null,
+        planningFailure: true,
+        proposal: error.body?.plannedProposal || null
+      }, error.body?.abortReason === 'successful_action_repeated'
+        ? 'JARVIS остановил повтор уже успешного действия и самостоятельно ищет следующий недостигнутый результат.'
+        : 'Нужный объект не удалось безопасно подтвердить. Можно дать одну короткую подсказку или показать только этот шаг.');
+      if (anarchyMode) {
+        await recoverAnarchy('Проверка цели не прошла', error.message, {
+          errorCode: error.body?.error,
+          abortReason: error.body?.abortReason
+        });
+        return;
+      }
+    }
+    if (error.body?.abortReason === 'jarvis_stopped_safely') {
+      currentMission = error.body?.mission || currentMission;
+      await recoverAnarchy('JARVIS исчерпал очевидные варианты', error.message, {
+        errorCode: error.body?.error,
+        abortReason: error.body?.abortReason
+      });
+      return;
+    }
+    if (anarchyMode) {
+      currentMission = error.body?.mission || currentMission;
+      await recoverAnarchy('План не удалось уверенно привязать к свежему экрану', error.message, {
+        errorCode: error.body?.error,
+        abortReason: error.body?.abortReason
+      });
+      return;
+    }
     setStatus(`${error.message}${suggestion}`, { error: true });
   } finally {
     busy = false;
@@ -269,7 +907,7 @@ async function planNextStep(retriedAfterRestart = false) {
   }
 }
 
-async function executeStep() {
+async function executeStep({ autonomous = false, runId = null } = {}) {
   if (currentSkillRun?.currentStep) return executeLearnedStep();
   if (!currentPlan?.planId || busy) return;
   busy = true;
@@ -279,12 +917,30 @@ async function executeStep() {
   try {
     const body = await api('/api/agent/execute-plan', {
       method: 'POST',
-      body: JSON.stringify({ planId: currentPlan.planId, confirmed: true })
+      body: JSON.stringify(autonomous
+        ? { planId: currentPlan.planId, autonomous: true }
+        : { planId: currentPlan.planId, confirmed: true })
     });
+    if (autonomous && (!anarchyMode || runId !== anarchyRunId)) return;
     currentMission = body.mission || currentMission;
     resetFeedbackView();
-    completedStep = body;
+    completedStep = autonomous ? null : body;
     resetStepView();
+    if (autonomous) {
+      anarchyStepCount += 1;
+      const learned = body.jarvisLearning?.name ? ` Сохранён опыт: ${body.jarvisLearning.name}.` : '';
+      const evidence = body.validation?.evidence || 'Видимый результат проверен.';
+      setStatus(body.validation?.success
+        ? `Гипотеза подтверждена: ${evidence}${learned} JARVIS готовит следующий шаг…`
+        : `Гипотеза не подтвердилась: ${evidence} JARVIS учитывает ошибку и меняет способ…`);
+      reportJarvis(body.validation?.success ? 'Результат' : 'Ошибка', body.validation?.success
+        ? `${evidence}${learned} Далее: проверить следующий недостигнутый результат.`
+        : `${evidence} Далее: свежий снимок и другой способ.`);
+      anarchyRecoveryState = resetAnarchyRecoveryState(currentMission?.missionId || null);
+      if (currentMission?.status === 'limit_reached') currentMission = null;
+      scheduleAnarchyContinuation('plan');
+      return;
+    }
     feedbackCard.hidden = false;
     feedbackTitle.textContent = body.validation?.success ? 'Шаг выполнен и проверен' : 'Шаг выполнен — проверьте глазами';
     feedbackDetail.textContent = body.validation?.evidence || 'Отметьте только итог: правильно или неправильно.';
@@ -295,8 +951,13 @@ async function executeStep() {
     if (error.body?.error === 'needs_replan') {
       currentPlan = null; // Invalidate old plan
       resetStepView();
-      setStatus('Окно изменило размер или позицию. Запрашиваю новый план для того же окна…');
-      // One request produces one fresh proposal; execution still requires confirmation.
+      setStatus('Окно или его содержимое изменилось после планирования. Запрашиваю новый план по свежему снимку…');
+      if (autonomous) {
+        setStatus('Экран изменился. JARVIS отменил устаревшую точку и пересчитывает действие по свежему снимку…');
+        scheduleAnarchyContinuation('plan');
+        return;
+      }
+      // One request produces one fresh proposal; guided execution still requires confirmation.
       try {
         const replanBody = await api('/api/missions/plan-next', {
           method: 'POST',
@@ -319,7 +980,8 @@ async function executeStep() {
       return; // Do not mark as executed - user must confirm new plan
     }
     resetStepView();
-    setStatus(`Шаг не выполнен: ${error.message}`, { error: true });
+    if (autonomous) await recoverAnarchy('Автономный шаг не сработал', error.message);
+    else setStatus(`Шаг не выполнен: ${error.message}`, { error: true });
   } finally {
     busy = false;
     updateControls();
@@ -333,10 +995,8 @@ async function executeLearnedStep() {
   setStatus('Выполняю один шаг из вашей демонстрации и проверяю результат…');
   updateControls();
   try {
-    const body = await api('/api/skills/execute-step', {
-      method: 'POST',
-      body: JSON.stringify({ runId: currentSkillRun.runId, confirmed: true })
-    });
+    const request = executeSavedSkillStepRequest({ runId: currentSkillRun.runId });
+    const body = await api(request.path, request.options);
     currentSkillRun.status = body.status;
     currentSkillRun.stepIndex = body.executedStepIndex + 1;
     currentSkillRun.currentStep = null;
@@ -345,7 +1005,12 @@ async function executeLearnedStep() {
     resetStepView();
     feedbackCard.hidden = false;
     feedbackTitle.textContent = body.validation?.success ? 'Шаг по показу выполнен' : 'Проверьте шаг по показу';
-    feedbackDetail.textContent = body.validation?.evidence || 'Отметьте только итог: правильно или неправильно.';
+    const referenceText = body.referenceValidation
+      ? body.referenceValidation.status === 'matched'
+        ? ' Финальный результат совпал с вашим визуальным референсом.'
+        : ` Сверка с референсом требует проверки: ${body.referenceValidation.evidence || body.referenceValidation.reason || 'нет уверенного совпадения'}`
+      : '';
+    feedbackDetail.textContent = `${body.validation?.evidence || 'Отметьте только итог: правильно или неправильно.'}${referenceText}`;
     setStatus('Оцените этот шаг: 👍 или 👎. Затем появится следующий шаг демонстрации.');
   } catch (error) {
     setStatus(`Шаг демонстрации не выполнен: ${error.message}`, { error: true });
@@ -369,6 +1034,7 @@ async function rateStep(rating) {
   else negativeButton.textContent = '⏳';
   updateControls();
   let continueMission = false;
+  let resumeCorrectedTask = false;
   try {
     const body = await api('/api/feedback/rate', {
       method: 'POST',
@@ -377,19 +1043,36 @@ async function rateStep(rating) {
     completedStep = null;
     feedbackCard.hidden = true;
     if (ratedStep.source === 'skill') {
-      if (ratedStep.nextStep && ratedStep.status === 'ready') {
+      if (rating === 'negative') {
+        showCorrection({ source: 'skill', ratedStep }, 'Шаг по показу оказался неверным. Можно показать правильный вариант только этого шага; описание не обязательно.');
+        setStatus('Ошибка сохранена. Исправьте этот шаг текстом, мини‑демонстрацией или попросите другой способ.');
+      } else if (ratedStep.nextStep && ratedStep.status === 'ready') {
         showLearnedStep(ratedStep.nextStep);
       } else {
         currentSkillRun = null;
         demoRunButton.hidden = false;
-        setStatus('Выполнение по демонстрации завершено. Последняя оценка сохранена.');
+        if (correctionResume) {
+          taskInput.value = correctionResume.instruction;
+          anarchyMode = correctionResume.anarchyMode === true;
+          anarchyAwaitingCorrection = false;
+          anarchyResumeGoal = correctionResume.autonomousGoal || null;
+          selectedWindowHandle = correctionResume.windowHandle || selectedWindowHandle;
+          correctionResume = null;
+          resumeCorrectedTask = true;
+          setStatus('Исправленный шаг принят. Возвращаюсь к исходной задаче и продолжаю со свежего экрана…');
+        } else {
+          setStatus('Выполнение по демонстрации завершено. Последняя оценка сохранена.');
+        }
       }
     } else {
       currentMission = body.mission || currentMission;
-      continueMission = Boolean(currentMission && currentMission.status !== 'limit_reached');
-      setStatus(rating === 'positive'
-        ? 'Правильный результат сохранён. Готовлю следующий шаг…'
-        : 'Ошибка сохранена. Готовлю другой или исправляющий следующий шаг…');
+      if (rating === 'negative') {
+        showCorrection({ source: 'mission', missionId: currentMission?.missionId || null, ratedStep }, 'Ошибка уже сохранена. Описание необязательно — можно сразу показать правильный шаг или попросить другой способ.');
+        setStatus('Ошибка сохранена. Выберите способ коррекции этого шага.');
+      } else {
+        continueMission = Boolean(currentMission && currentMission.status !== 'limit_reached');
+        setStatus('Правильный результат сохранён. Готовлю следующий шаг…');
+      }
     }
   } catch (error) {
     setStatus(`Не удалось сохранить оценку: ${error.message}`, { error: true });
@@ -402,6 +1085,111 @@ async function rateStep(rating) {
     updateControls();
   }
   if (continueMission) await planNextStep();
+  else if (resumeCorrectedTask) await planNextStep();
+}
+
+function teachCurrentStep() {
+  if (currentPlan?.planId) {
+    showCorrection({
+      source: 'mission',
+      missionId: currentMission?.missionId || currentPlan.missionId || null,
+      proposal: currentPlan.proposal || null
+    }, 'Передайте JARVIS наблюдение об ошибке. Он сам переснимет экран, сформулирует переносимый урок и подготовит другой шаг.');
+    return;
+  }
+  if (currentSkillRun?.currentStep) {
+    showCorrection({
+      source: 'skill',
+      proposal: { action: currentSkillRun.currentStep }
+    }, 'Исправьте этот сохранённый шаг текстом либо покажите правильное действие. После показа модель продолжит исходную задачу со свежего экрана.');
+  }
+}
+
+function correctionInstruction(context) {
+  const proposal = context?.proposal || context?.ratedStep?.proposal || null;
+  const executed = context?.ratedStep?.executedStep || null;
+  const reason = proposal?.reason || executed?.reason || actionLabel(executed || proposal?.action || {});
+  const expected = proposal?.expectedResult || '';
+  return `Покажите правильное выполнение только этого шага: ${reason}${expected ? `. Ожидаемый результат: ${expected}` : ''}`;
+}
+
+async function submitCorrection({ tryAnother = false } = {}) {
+  if (!pendingCorrection || busy) return;
+  const context = pendingCorrection;
+  const correction = tryAnother
+    ? 'Предыдущий способ неверен. Выбери другой безопасный видимый способ и не повторяй то же действие.'
+    : correctionInput.value.trim();
+  if (!correction) return;
+  busy = true;
+  updateControls();
+  try {
+    if (context.missionId) {
+      const body = await api('/api/missions/correct-step', {
+        method: 'POST',
+        body: JSON.stringify({ missionId: context.missionId, correction })
+      });
+      currentMission = body.mission || currentMission;
+    } else {
+      const resume = correctionResume || {
+        instruction: taskInput.value.trim() || currentSkillRun?.skill?.instruction || '',
+        windowHandle: selectedWindowHandle,
+        anarchyMode: false,
+        autonomousGoal: null
+      };
+      await cancelSkillRun();
+      taskInput.value = resume.instruction;
+      selectedWindowHandle = resume.windowHandle || selectedWindowHandle;
+      anarchyMode = resume.anarchyMode === true;
+      anarchyAwaitingCorrection = false;
+      const started = await api('/api/missions', {
+        method: 'POST',
+        body: JSON.stringify({
+          windowHandle: selectedWindowHandle,
+          instruction: anarchyMode ? ANARCHY_INSTRUCTION : taskInput.value.trim(),
+          maxSteps: anarchyMode ? 5 : 30,
+          mode: anarchyMode ? 'anarchy' : 'guided',
+          autonomousGoal: anarchyMode ? resume.autonomousGoal || anarchyResumeGoal : null
+        })
+      });
+      currentMission = started.mission;
+      anarchyResumeGoal = null;
+      const corrected = await api('/api/missions/correct-step', {
+        method: 'POST',
+        body: JSON.stringify({ missionId: currentMission.missionId, correction })
+      });
+      currentMission = corrected.mission || currentMission;
+      correctionResume = null;
+    }
+    hideCorrection();
+    anarchyAwaitingCorrection = false;
+    setStatus('Коррекция сохранена. Модель заново смотрит на свежий экран…');
+  } catch (error) {
+    setStatus(`Не удалось сохранить коррекцию: ${error.message}`, { error: true });
+    return;
+  } finally {
+    busy = false;
+    updateControls();
+  }
+  await planNextStep();
+}
+
+async function demonstrateCorrectionStep() {
+  if (!pendingCorrection || busy) return;
+  const resumeInstruction = taskInput.value.trim() ||
+    (anarchyMode ? '' : currentMission?.instruction || currentSkillRun?.skill?.instruction || '');
+  correctionResume = {
+    instruction: resumeInstruction,
+    windowHandle: selectedWindowHandle,
+    anarchyMode,
+    autonomousGoal: currentMission?.autonomousGoal || anarchyResumeGoal || null,
+    missionId: currentMission?.missionId || null
+  };
+  stepTeachingContext = {
+    instruction: correctionInstruction(pendingCorrection),
+    source: pendingCorrection.source
+  };
+  hideCorrection();
+  await toggleTeaching();
 }
 
 function drawTrace(events = []) {
@@ -479,6 +1267,10 @@ async function pollTeaching() {
     if (!body.active) return;
     teachingSession = body.session;
     renderTeachingPreview(body.session?.preview);
+    if (body.session?.recorderStopped && !busy) {
+      stopTeachingPoll();
+      await toggleTeaching();
+    }
   } catch { }
 }
 
@@ -492,36 +1284,114 @@ function stopTeachingPoll() {
   teachingTimer = null;
 }
 
+async function resumeAfterStepDemonstration(skillId) {
+  if (!correctionResume) return;
+  const resume = correctionResume;
+  taskInput.value = resume.instruction;
+  selectedWindowHandle = resume.windowHandle || selectedWindowHandle;
+  anarchyMode = resume.anarchyMode === true;
+  anarchyAwaitingCorrection = false;
+  anarchyResumeGoal = resume.autonomousGoal || null;
+  if (!resume.missionId || currentMission?.missionId !== resume.missionId) {
+    const started = await api('/api/missions', {
+      method: 'POST',
+      body: JSON.stringify({
+        windowHandle: selectedWindowHandle,
+        instruction: anarchyMode ? ANARCHY_INSTRUCTION : taskInput.value.trim(),
+        maxSteps: anarchyMode ? 6 : 30,
+        mode: anarchyMode ? 'anarchy' : 'guided',
+        autonomousGoal: anarchyMode ? anarchyResumeGoal : null
+      })
+    });
+    currentMission = started.mission;
+  }
+  anarchyResumeGoal = null;
+  const corrected = await api('/api/missions/correct-step', {
+    method: 'POST',
+    body: JSON.stringify({
+      missionId: currentMission.missionId,
+      correction: `Пользователь только что показал правильное выполнение ошибочного шага. Результат уже находится на свежем экране; не повторяй этот шаг. Продолжи исходную задачу со следующего ещё не выполненного результата. Сохранённый пример: ${skillId}.`
+    })
+  });
+  currentMission = corrected.mission || currentMission;
+  correctionResume = null;
+  setStatus('Исправленный шаг сохранён как опыт. Продолжаю исходную задачу со свежего результата…');
+  await planNextStep(false, anarchyMode ? anarchyRunId : null);
+}
+
 async function toggleTeaching() {
-  if (busy) return;
+  if (busy) {
+    if (anarchyMode && !teachingSession) {
+      teachingRequested = true;
+      clearAnarchyTimer();
+      anarchyRunId += 1;
+      demoButton.textContent = 'Готовлю показ…';
+      setStatus('Завершаю только текущее физическое действие и сразу передаю вам управление для показа. Миссия и обучение сохраняются.');
+      updateControls();
+    }
+    return;
+  }
+  let resumeCorrectionSkillId = null;
   busy = true;
   updateControls();
   try {
     if (!teachingSession) {
-      await cancelMission();
+      const passiveLearning = !stepTeachingContext;
+      if (anarchyMode) {
+        clearAnarchyTimer();
+        anarchyRunId += 1;
+        if (!correctionResume) {
+          correctionResume = {
+            instruction: '',
+            windowHandle: selectedWindowHandle,
+            anarchyMode: true,
+            autonomousGoal: currentMission?.autonomousGoal || anarchyResumeGoal || null,
+            missionId: currentMission?.missionId || null
+          };
+          stepTeachingContext = {
+            instruction: `Покажите правильный способ для текущей гипотезы JARVIS: ${currentMission?.autonomousGoal?.goal || 'преодолеть текущее затруднение в видимом интерфейсе'}`,
+            source: 'anarchy'
+          };
+        }
+      }
       await cancelSkillRun();
       resetFeedbackView();
       demoRunButton.hidden = true;
-      const instruction = taskInput.value.trim();
+      const instruction = passiveLearning
+        ? 'Наблюдать за моей работой и сохранять переносимые приёмы'
+        : stepTeachingContext?.instruction || taskInput.value.trim() || 'Показать правильный способ для текущего затруднения';
+      if (passiveLearning) {
+        demoButton.textContent = 'Через 3 секунды…';
+        demoTitle.textContent = 'Выберите окно для наблюдения';
+        demoStatus.textContent = 'Перейдите в любую программу на любом мониторе. Агент только наблюдает.';
+        setStatus('Через 3 секунды начнётся пассивное обучение. Выберите нужное окно…');
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
       const body = await api('/api/teach/start', {
         method: 'POST',
         body: JSON.stringify({
-          windowHandle: selectedWindowHandle,
+          ...(passiveLearning
+            ? { captureForeground: true, learningMode: 'passive' }
+            : { windowHandle: selectedWindowHandle }),
           instruction,
           name: instruction.slice(0, 96),
-          maxDurationSeconds: 180
+          maxDurationSeconds: passiveLearning ? 1800 : 180
         })
       });
       teachingSession = body;
-      demoButton.textContent = 'Завершить показ';
+      demoButton.textContent = passiveLearning ? 'Завершить наблюдение' : 'Завершить показ';
       demoButton.classList.add('recording');
-      demoTitle.textContent = 'Демонстрация записывается';
-      demoStatus.textContent = 'Работайте в выбранной программе. Здесь видны траектория и клавиши.';
+      demoTitle.textContent = passiveLearning ? 'Ассистент наблюдает и учится' : 'Демонстрация записывается';
+      demoStatus.textContent = `Записываются мышь, клавиатура, траектории и изменения только в окне: ${body.window?.name || body.window?.processName || 'выбранная программа'}. Завершите прямо там: Ctrl+Alt+F10.`;
       demoLive.hidden = false;
       renderTeachingPreview();
       startTeachingPoll();
-      setStatus('Покажите правильное выполнение в выбранной программе.');
+      setStatus(passiveLearning
+        ? 'Работайте как обычно. В конце не возвращайтесь сюда: нажмите Ctrl+Alt+F10, чтобы сохранить настоящий итоговый экран.'
+        : 'Покажите правильное выполнение в выбранной программе.');
     } else {
+      const wasStepCorrection = Boolean(stepTeachingContext);
+      const wasPassiveLearning = teachingSession.learningMode === 'passive';
       stopTeachingPoll();
       demoButton.disabled = true;
       demoStatus.textContent = 'Собираю логический навык из траектории, элементов и клавиш…';
@@ -530,14 +1400,35 @@ async function toggleTeaching() {
         body: JSON.stringify({ sessionId: teachingSession.sessionId })
       });
       teachingSession = null;
-      latestDemonstratedSkillId = body.skill?.skillId || null;
-      if (latestDemonstratedSkillId) localStorage.setItem('ai-latest-skill-id', latestDemonstratedSkillId);
-      demoButton.textContent = 'Демонстрация';
+      if (!wasPassiveLearning) {
+        latestDemonstratedSkillId = body.skill?.skillId || null;
+        if (latestDemonstratedSkillId) localStorage.setItem('ai-latest-skill-id', latestDemonstratedSkillId);
+      }
+      demoButton.textContent = 'Наблюдать и учиться';
       demoButton.classList.remove('recording');
-      demoTitle.textContent = 'Показ сохранён';
-      demoStatus.textContent = `Сохранено ${body.skill?.steps?.length || 0} действий. Верните программу к состоянию до показа и запустите выполнение ниже.`;
-      demoRunButton.hidden = !latestDemonstratedSkillId;
-      setStatus('Показ сохранён. Когда программа снова будет в исходном состоянии, нажмите «Выполнить с учётом показа».');
+      demoTitle.textContent = wasStepCorrection ? 'Исправленный шаг сохранён' : 'Показ сохранён';
+      demoStatus.textContent = wasStepCorrection
+        ? `Сохранено ${body.skill?.steps?.length || 0} действий и финальный визуальный референс. Результат показа уже принят как исправление.`
+        : `Сохранено ${body.skill?.steps?.length || 0} действий и финальный визуальный референс. Верните программу к состоянию до показа и запустите выполнение ниже.`;
+      demoRunButton.hidden = wasStepCorrection || wasPassiveLearning || !latestDemonstratedSkillId;
+      setStatus(wasStepCorrection
+        ? 'Мини‑демонстрация шага сохранена вместе с референсом. Продолжаю исходную задачу с уже достигнутого результата.'
+        : 'Показ сохранён. Когда программа снова будет в исходном состоянии, нажмите «Выполнить с учётом показа».');
+      if (wasPassiveLearning) {
+        const semantic = body.semanticCompilation?.experience;
+        latestObservedSkill = body.skill?.semanticExperience ? body.skill : null;
+        observationReview.hidden = !latestObservedSkill;
+        observationUnderstanding.hidden = true;
+        demoTitle.textContent = semantic?.understood ? 'Опыт понят и сохранён' : 'Наблюдение сохранено для уточнения';
+        demoStatus.textContent = semantic?.understood
+          ? `Цель: ${semantic.sessionGoal || 'определена'}. Результат: ${semantic.comparison?.outcome || 'сравнён по кадрам до и после'}. Причинных эпизодов: ${semantic.episodes?.length || 0}; шумные движения не будут воспроизводиться.`
+          : `Сырые действия и кадры сохранены, но смысл пока не подтверждён. ${body.semanticCompilationError || semantic?.comparison?.outcome || 'Нужно более короткое наблюдение или уточнение.'}`;
+        setStatus(semantic?.understood
+          ? 'JARVIS сравнил начало и итог, выделил цель, причинные действия и переносимые приёмы.'
+          : 'Наблюдение не потеряно, но не будет выдаваться за готовое знание без уверенного сравнения результата.');
+      }
+      if (wasStepCorrection) resumeCorrectionSkillId = latestDemonstratedSkillId;
+      stepTeachingContext = null;
     }
   } catch (error) {
     stopTeachingPoll();
@@ -550,7 +1441,7 @@ async function toggleTeaching() {
       } catch { }
     }
     teachingSession = null;
-    demoButton.textContent = 'Демонстрация';
+    demoButton.textContent = 'Наблюдать и учиться';
     demoButton.classList.remove('recording');
     demoTitle.textContent = 'Показ не сохранён';
     demoStatus.textContent = error.message;
@@ -559,6 +1450,62 @@ async function toggleTeaching() {
     busy = false;
     updateControls();
   }
+  if (resumeCorrectionSkillId) {
+    try {
+      await resumeAfterStepDemonstration(resumeCorrectionSkillId);
+    } catch (error) {
+      setStatus(`Показ сохранён, но продолжить исходную задачу не удалось: ${error.message}`, { error: true });
+    }
+  }
+}
+
+function explainLatestObservation() {
+  if (!latestObservedSkill) return;
+  const summary = summarizeSemanticObservation(latestObservedSkill);
+  observationUnderstanding.textContent = summary;
+  observationUnderstanding.hidden = false;
+  demoStatus.textContent = canRepeatSemanticObservation(latestObservedSkill)
+    ? 'Если описание верное, нажмите «Повтори понятое». Модель построит действия заново по свежему экрану.'
+    : 'Смысл недостаточно подтверждён для повтора. Покажите более короткое законченное действие и завершите его Ctrl+Alt+F10.';
+  reportJarvis('Наблюдение', summary);
+  updateControls();
+}
+
+async function repeatLatestObservation() {
+  if (!selectedWindowHandle || busy) return;
+  const goal = semanticObservationGoal(latestObservedSkill);
+  if (!goal) {
+    explainLatestObservation();
+    setStatus('JARVIS пока не понял наблюдение достаточно хорошо для смыслового повтора.', { error: true });
+    return;
+  }
+  const selected = windowCatalog.find((item) => Number(item.nativeWindowHandle) === selectedWindowHandle);
+  if (selected?.processName !== latestObservedSkill.application?.processName) {
+    setStatus(`Выберите окно программы ${latestObservedSkill.application?.processName || 'из наблюдения'}, затем повторите попытку.`, { error: true });
+    return;
+  }
+  busy = true;
+  updateControls();
+  try {
+    stopAnarchyLoop();
+    await cancelMission();
+    await cancelSkillRun();
+    hideCorrection();
+    resetFeedbackView();
+    taskInput.value = goal.goal;
+    anarchyMode = true;
+    semanticReplayMode = true;
+    anarchyAwaitingCorrection = false;
+    anarchyRunId += 1;
+    anarchyStepCount = 0;
+    anarchyResumeGoal = goal;
+    setStatus(`Повторяю понятое: ${goal.goal}. Координаты записи не воспроизводятся — каждый шаг заново ищется и проверяется.`);
+    reportJarvis('Повтор', `Цель: ${goal.goal}. Критерий: ${goal.successCriteria}`);
+  } finally {
+    busy = false;
+    updateControls();
+  }
+  await planNextStep(false, anarchyRunId);
 }
 
 async function runDemonstratedSkill() {
@@ -568,13 +1515,11 @@ async function runDemonstratedSkill() {
   try {
     await cancelMission();
     resetFeedbackView();
-    const body = await api('/api/skills/prepare', {
-      method: 'POST',
-      body: JSON.stringify({
-        windowHandle: selectedWindowHandle,
-        skillId: latestDemonstratedSkillId
-      })
+    const request = prepareSavedSkillRequest({
+      windowHandle: selectedWindowHandle,
+      skillId: latestDemonstratedSkillId
     });
+    const body = await api(request.path, request.options);
     currentSkillRun = {
       ...body,
       stepIndex: 0,
@@ -600,35 +1545,122 @@ windowSelect.addEventListener('change', async () => {
   resetFeedbackView();
   selectedWindowHandle = Number(windowSelect.value) || null;
   if (selectedWindowHandle) localStorage.setItem('ai-window-handle', String(selectedWindowHandle));
+  await watchSelectedWindow();
   await refreshLatestDemonstration();
   updateControls();
 });
 
 taskInput.addEventListener('input', () => {
+  if (anarchyMode) anarchyMode = false;
+  anarchyResumeGoal = null;
   if (currentMission && taskInput.value.trim() !== currentMission.instruction) cancelMission();
   resetFeedbackView();
   taskButton.textContent = currentMission ? 'Следующий шаг' : 'Подготовить первый шаг';
   updateControls();
 });
 
+correctionInput.addEventListener('input', updateControls);
+
 taskInput.addEventListener('keydown', (event) => {
   if (event.ctrlKey && event.key === 'Enter') planNextStep();
 });
 
 taskButton.addEventListener('click', () => planNextStep());
-executeButton.addEventListener('click', executeStep);
+executeButton.addEventListener('click', () => executeStep());
+teachStepButton.addEventListener('click', teachCurrentStep);
 positiveButton.addEventListener('click', () => rateStep('positive'));
 negativeButton.addEventListener('click', () => rateStep('negative'));
+correctionSubmit.addEventListener('click', () => submitCorrection());
+correctionSkip.addEventListener('click', () => submitCorrection({ tryAnother: true }));
+correctionDemo.addEventListener('click', demonstrateCorrectionStep);
 demoButton.addEventListener('click', toggleTeaching);
 demoRunButton.addEventListener('click', runDemonstratedSkill);
+observationUnderstoodButton.addEventListener('click', explainLatestObservation);
+observationRepeatButton.addEventListener('click', repeatLatestObservation);
+teacherScreenshot.addEventListener('change', () => {
+  teacherAttachment.textContent = teacherScreenshot.files?.[0]?.name || 'Файл не выбран';
+});
+teacherSend.addEventListener('click', sendTeacherMessage);
+teacherMessage.addEventListener('keydown', (event) => {
+  if (event.ctrlKey && event.key === 'Enter') sendTeacherMessage();
+});
+teacherApply.addEventListener('click', applyTeacherCodeProposal);
+teacherTaskRun.addEventListener('click', runTeacherTask);
+teacherSave.addEventListener('click', async () => {
+  teacherSave.disabled = true;
+  try {
+    const body = await api('/api/teacher/profile', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: teacherName.value.trim(),
+        mission: teacherMission.value.trim(),
+        values: teacherValues.value.trim()
+      })
+    });
+    teacherProfileLoaded = false;
+    renderTeacherProfile(body);
+    setStatus('Цели и ценности JARVIS сохранены. Они применятся к следующему плану.');
+  } catch (error) {
+    setStatus(`Не удалось сохранить JARVIS: ${error.message}`, { error: true });
+  } finally {
+    teacherSave.disabled = false;
+  }
+});
+
+anarchyButton.addEventListener('click', async () => {
+  if (anarchyMode) {
+    if (anarchyAwaitingCorrection) {
+      anarchyAwaitingCorrection = false;
+      anarchyRecoveryState = resetAnarchyRecoveryState();
+      hideCorrection();
+      await cancelMission();
+      setStatus('Свободный режим продолжен. JARVIS выбирает новую цель по свежему экрану…');
+      updateControls();
+      await planNextStep(false, anarchyRunId);
+      return;
+    }
+    stopAnarchyLoop();
+    await cancelMission();
+    resetFeedbackView();
+    setStatus('Автономная сессия остановлена. Обычная задача и ваши данные не изменены.');
+    updateControls();
+    return;
+  }
+  if (busy || !selectedWindowHandle) return;
+  await cancelMission();
+  await cancelSkillRun();
+  hideCorrection();
+  resetFeedbackView();
+  anarchyMode = true;
+  semanticReplayMode = false;
+  anarchyAwaitingCorrection = false;
+  anarchyRunId += 1;
+  anarchyStepCount = 0;
+  anarchyResumeGoal = null;
+  setStatus('JARVIS начал непрерывное автономное обучение в выбранной программе. Он сам ставит гипотезы, выполняет и проверяет действия без подтверждений и работает до повторного нажатия «Анархичность» или «Стоп».');
+  updateControls();
+  await planNextStep(false, anarchyRunId);
+});
 
 safetyToggle.addEventListener('click', async () => {
   safetyToggle.disabled = true;
   try {
     if (paused) {
-      await api('/api/safety/resume', { method: 'POST', body: JSON.stringify({ confirmed: true }) });
+      setStatus('Запускаю LM Studio и загружаю локальную модель…');
+      await api('/api/safety/resume', {
+        method: 'POST',
+        body: JSON.stringify({ confirmed: true, startModel: true })
+      });
     } else {
-      await api('/api/safety/pause', { method: 'POST', body: JSON.stringify({ reason: 'Остановлено пользователем из простого интерфейса' }) });
+      if (anarchyMode) stopAnarchyLoop();
+      setStatus('Останавливаю действия, наблюдение и LM Server…');
+      await api('/api/safety/pause', {
+        method: 'POST',
+        body: JSON.stringify({
+          reason: 'Остановлено пользователем из простого интерфейса',
+          stopModel: true
+        })
+      });
     }
     await refreshSystemStatus();
   } catch (error) {
@@ -638,18 +1670,54 @@ safetyToggle.addEventListener('click', async () => {
   }
 });
 
+fullShutdownButton.addEventListener('click', async () => {
+  if (fullShutdownActive) return;
+  fullShutdownActive = true;
+  if (anarchyMode) stopAnarchyLoop();
+  clearAnarchyTimer();
+  stopTeachingPoll();
+  statusDot.className = 'status-dot pending';
+  statusText.textContent = 'Полностью отключаю локальный ИИ…';
+  taskStatus.textContent = 'Останавливаю задания, наблюдение, виртуальный курсор, Worker и LM Studio.';
+  updateControls();
+  try {
+    await api('/api/system/shutdown', {
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true })
+    });
+    statusDot.className = 'status-dot';
+    statusText.textContent = 'Полностью отключено';
+    taskStatus.textContent = 'Все локальные компоненты ИИ остановлены. Для нового запуска используйте start-all.ps1.';
+  } catch (error) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    try {
+      await api('/api/status');
+      fullShutdownActive = false;
+      statusDot.className = 'status-dot error';
+      statusText.textContent = 'Не удалось полностью отключить';
+      taskStatus.textContent = error.message;
+      updateControls();
+    } catch {
+      // The expected final state is an unavailable controller.
+      statusDot.className = 'status-dot';
+      statusText.textContent = 'Полностью отключено';
+      taskStatus.textContent = 'Локальный ИИ остановлен. Панель больше не подключена к контроллеру.';
+    }
+  }
+});
+
 window.addEventListener('resize', () => {
   if (!demoLive.hidden) pollTeaching();
 });
 
-await Promise.all([refreshSystemStatus(), scanWindows()]);
+await Promise.all([refreshSystemStatus(), scanWindows(), refreshTeacherChat()]);
 try {
   const teaching = await api('/api/teach/status');
   if (teaching.active) {
     teachingSession = teaching.session;
-    demoButton.textContent = 'Завершить показ';
+    demoButton.textContent = teaching.session?.learningMode === 'passive' ? 'Завершить наблюдение' : 'Завершить показ';
     demoButton.classList.add('recording');
-    demoTitle.textContent = 'Демонстрация записывается';
+    demoTitle.textContent = teaching.session?.learningMode === 'passive' ? 'Ассистент наблюдает и учится' : 'Демонстрация записывается';
     demoLive.hidden = false;
     renderTeachingPreview(teaching.session?.preview);
     startTeachingPoll();

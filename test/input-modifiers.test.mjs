@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizePlannerOutput, toScreenPointerAction } from '../src/agent-planner.mjs';
 import { normalizeInputModifiers } from '../src/input-modifiers.mjs';
-import { createBoundedPointerRequest, normalizePointerAction } from '../src/pointer-bridge.mjs';
+import { createBoundedPointerRequest, fitPointerActionToAllowedBounds, normalizePointerAction } from '../src/pointer-bridge.mjs';
 import { learnedStepToPointerAction } from '../src/skill-runner.mjs';
 import { buildSkillFromRecording } from '../src/teaching.mjs';
 
@@ -29,6 +29,34 @@ test('pointer requests preserve an explicitly required drag modifier', () => {
   });
   assert.deepEqual(bounded.modifiers, ['Control']);
   assert.throws(() => normalizePointerAction({ ...action, modifiers: ['Meta'] }), /only Control, Shift, and Alt/);
+});
+
+test('display boundary fitting corrects only the invisible maximized-window frame', () => {
+  const allowedBounds = { x: 1920, y: 0, width: 1920, height: 1080 };
+  const fitted = fitPointerActionToAllowedBounds({
+    windowHandle: 10,
+    action: 'drag',
+    confirmed: true,
+    from: { x: 1912, y: -8 },
+    to: { x: 2783, y: 485 },
+    durationMs: 350,
+    trajectory: [{ x: 1916, y: -2 }, { x: 2200, y: 200 }]
+  }, allowedBounds);
+  assert.equal(fitted.boundaryAdjusted, true);
+  assert.deepEqual(fitted.action.from, { x: 1920, y: 0 });
+  assert.deepEqual(fitted.action.to, { x: 2783, y: 485 });
+  assert.deepEqual(fitted.action.trajectory[0], { x: 1920, y: 0 });
+});
+
+test('display boundary fitting still rejects a genuinely off-display point', () => {
+  assert.throws(() => fitPointerActionToAllowedBounds({
+    windowHandle: 10,
+    action: 'drag',
+    confirmed: true,
+    from: { x: 1800, y: 100 },
+    to: { x: 2783, y: 485 },
+    durationMs: 350
+  }, { x: 1920, y: 0, width: 1920, height: 1080 }), /outside the AI display/);
 });
 
 test('recorded and learned drags retain modifiers and trajectory semantics', () => {
@@ -65,4 +93,19 @@ test('planner carries only explicit valid modifiers into screen actions', () => 
     toScreenPointerAction(proposal.action, { x: 100, y: 50, width: 1000, height: 800 }, 10).modifiers,
     ['Control']
   );
+});
+
+test('canvas text insertion preserves insert mode through the pointer request', () => {
+  const proposal = normalizePlannerOutput({
+    observation: 'Текстовый инструмент активен',
+    action: {
+      type: 'typeText', point: { x: 0.5, y: 0.5 }, text: 'Привет', textMode: 'insert',
+      targetHint: { name: 'Document canvas', controlType: 'Canvas' }
+    },
+    reason: 'Создать новый текст', expectedResult: 'Фраза появится',
+    risk: { level: 'local_change', reason: 'Локальная правка' }, confidence: 0.9
+  });
+  const screen = toScreenPointerAction(proposal.action, { x: 0, y: 0, width: 1000, height: 800 }, 10);
+  assert.equal(screen.textMode, 'insert');
+  assert.equal(normalizePointerAction(screen).textMode, 'insert');
 });
