@@ -189,6 +189,12 @@ import { ToolRegistry } from './tool-registry.mjs';
 import { InputArbiter } from './input-arbiter.mjs';
 import { readWindowsUserActivity } from './windows-user-activity.mjs';
 import { registerRepositoryTools } from './repository-tools.mjs';
+import {
+  benchmarkReportAllowsMutations,
+  readCurrentGitCommit,
+  readUnifiedModelBenchmarkReport
+} from './unified-model-benchmark.mjs';
+import { createUnifiedPolicy } from './unified-policy.mjs';
 
 let diagnostics;
 let diagnosticsError;
@@ -203,6 +209,7 @@ const teacherCodeProposals = new Map();
 const activeUnifiedSessions = new Set();
 let unifiedAgentEngine = null;
 let unifiedToolRegistry = null;
+let unifiedBenchmarkGate = { allowed: false, reason: 'not_evaluated', report: null, codeCommit: 'unknown' };
 const missionTtlMs = 30 * 60 * 1000;
 let executionPaused = false;
 let safetyReason = null;
@@ -1498,17 +1505,6 @@ function normalizeUnifiedMode(value) {
   return mode;
 }
 
-function unifiedPolicy() {
-  return {
-    async authorize({ manifest }) {
-      if (manifest.readOnly) return { allowed: true, reason: 'read_only' };
-      return config.unifiedAgentMutationsEnabled
-        ? { allowed: true, reason: 'benchmark_gate_enabled' }
-        : { allowed: false, reason: 'State-changing unified tools are locked until the replay benchmark passes.' };
-    }
-  };
-}
-
 function compactUnifiedInspection(inspected) {
   return {
     window: inspected.window,
@@ -2285,13 +2281,38 @@ await ensureTeacherProfile(config.teacherProfilePath);
 await refreshDiagnostics();
 
 {
+  const report = await readUnifiedModelBenchmarkReport(config.unifiedAgentBenchmarkReportPath).catch((error) => ({ invalid: error.message }));
+  const codeCommit = await readCurrentGitCommit(config.projectRoot);
+  const gate = benchmarkReportAllowsMutations({
+    report,
+    activeModel: config.activeModel,
+    protocolVersion: 1,
+    codeCommit
+  });
+  unifiedBenchmarkGate = {
+    ...gate,
+    allowed: config.unifiedAgentMutationsRequested && gate.allowed,
+    reason: !config.unifiedAgentMutationsRequested ? 'mutations_not_requested' : gate.reason,
+    report,
+    codeCommit
+  };
+}
+
+{
   const sessionStore = new SessionStore({ directory: config.agentSessionsDirectory, snapshotEvery: 50 });
   const ledger = new ToolInvocationLedger({ eventStore: sessionStore });
   const inputArbiter = new InputArbiter({
     activityProvider: () => readWindowsUserActivity(config.userActivityScript),
     ttlMs: 250
   });
-  unifiedToolRegistry = new ToolRegistry({ ledger, policy: unifiedPolicy(), inputArbiter });
+  const policy = createUnifiedPolicy({
+    gateProvider: () => ({
+      allowed: config.unifiedAgentMutationsRequested && unifiedBenchmarkGate.allowed,
+      reason: !config.unifiedAgentMutationsRequested ? 'mutations_not_requested' : unifiedBenchmarkGate.reason
+    }),
+    sessionProvider: async (sessionId) => (await sessionStore.load(sessionId)).state
+  });
+  unifiedToolRegistry = new ToolRegistry({ ledger, policy, inputArbiter });
   registerUnifiedRuntimeTools(unifiedToolRegistry);
   registerRepositoryTools(unifiedToolRegistry, { projectRoot: config.projectRoot });
   registerCodeCandidateTools(unifiedToolRegistry, {
@@ -2358,7 +2379,7 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${config.host}:${config.workerPort}`);
     requestUrl = url;
 
-    if (request.method === 'POST' && url.pathname === '/agent/sessions') {
+    if (config.unifiedAgentEnabled && request.method === 'POST' && url.pathname === '/agent/sessions') {
       try {
         const input = await readJson(request);
         const state = await startUnifiedAgentSession({
@@ -2373,7 +2394,7 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
-    if (request.method === 'POST' && url.pathname === '/agent/sessions/next') {
+    if (config.unifiedAgentEnabled && request.method === 'POST' && url.pathname === '/agent/sessions/next') {
       if (rejectWhenPaused(response)) return;
       const input = await readJson(request);
       try {
@@ -2384,7 +2405,7 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
-    if (request.method === 'POST' && url.pathname === '/agent/sessions/message') {
+    if (config.unifiedAgentEnabled && request.method === 'POST' && url.pathname === '/agent/sessions/message') {
       const input = await readJson(request);
       try {
         return sendJson(response, 200, releaseTerminalUnifiedSession(await unifiedAgentEngine.message(input.sessionId, input.message)));
@@ -2394,7 +2415,7 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
-    if (request.method === 'POST' && url.pathname === '/agent/sessions/stop') {
+    if (config.unifiedAgentEnabled && request.method === 'POST' && url.pathname === '/agent/sessions/stop') {
       const input = await readJson(request);
       try {
         const state = await unifiedAgentEngine.stop(input.sessionId, input.reason || 'user_stop');
@@ -2407,7 +2428,7 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
-    if (request.method === 'GET' && url.pathname === '/agent/sessions/status') {
+    if (config.unifiedAgentEnabled && request.method === 'GET' && url.pathname === '/agent/sessions/status') {
       const sessionId = url.searchParams.get('sessionId') || '';
       try {
         return sendJson(response, 200, { sessionId, state: await unifiedAgentEngine.status(sessionId) });
@@ -2443,11 +2464,22 @@ const server = http.createServer(async (request, response) => {
         },
         modelBroker: modelBroker.status(),
         unifiedAgent: {
+          enabled: config.unifiedAgentEnabled,
           activeModel: config.activeModel,
           activeSessionCount: activeUnifiedSessions.size,
-          stateChangingToolsEnabled: config.unifiedAgentMutationsEnabled,
+          stateChangingToolsEnabled: unifiedBenchmarkGate.allowed,
           eventLog: { status: 'ready', directory: config.agentSessionsDirectory },
-          toolCount: unifiedToolRegistry.manifests().length
+          toolCount: unifiedToolRegistry.manifests().length,
+          modelBenchmark: {
+            status: unifiedBenchmarkGate.allowed ? 'passed' : 'blocked',
+            reason: unifiedBenchmarkGate.reason,
+            model: unifiedBenchmarkGate.report?.model || null,
+            caseCounts: unifiedBenchmarkGate.report?.caseCounts || null,
+            thresholds: unifiedBenchmarkGate.report?.thresholds || null,
+            reportPath: config.unifiedAgentBenchmarkReportPath,
+            protocolVersion: unifiedBenchmarkGate.report?.protocolVersion || null,
+            codeCommit: unifiedBenchmarkGate.codeCommit
+          }
         },
         selfImprovement: {
           automaticWorkingTreeEdits: false,
