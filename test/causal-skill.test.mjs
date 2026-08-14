@@ -71,3 +71,15 @@ test('unclear observation remains evidence and cannot silently become replayable
   assert.equal(compiled.executionPolicy.replayable, false);
   assert.equal(compiled.causalReplay.ready, false);
 });
+
+test('a modified drag without a recorded trajectory cannot become a replayable causal skill', () => {
+  const skill = passiveSkill({
+    steps: [
+      { type: 'drag', from: { x: 0.1, y: 0.2 }, to: { x: 0.4, y: 0.5 }, modifiers: ['Control'], trajectoryMode: 'adaptive' }
+    ]
+  });
+  const readiness = causalReplayReadiness(skill);
+  assert.equal(readiness.ready, false);
+  assert.ok(readiness.reasons.includes('modified_drag_trajectory_missing'));
+  assert.equal(compileCausalReplaySkill(skill).causalReplay.ready, false);
+});

@@ -28,10 +28,10 @@ export function decideAnarchyRecovery(state, {
   const total = previous.total + 1;
   const nextState = { missionId, fingerprint, repeated, total };
   const infrastructureFailure = [
-    'display_capture_failed', 'worker_unavailable', 'model_unavailable',
+    'display_capture_failed', 'image_crop_failed', 'worker_unavailable', 'model_unavailable',
     'ECONNREFUSED', 'ENOENT'
   ].includes(errorCode) ||
-    /capture-display\.ps1|capture-window\.ps1|Get-FileHash|CommandNotFoundException|ECONNREFUSED|worker unavailable|LM Studio.+(?:unreachable|not reachable)/i
+    /capture-display\.ps1|capture-window\.ps1|crop-image(?:-region)?\.ps1|Get-FileHash|CommandNotFoundException|ECONNREFUSED|worker unavailable|LM Studio.+(?:unreachable|not reachable)/i
       .test(message);
   if (infrastructureFailure) {
     return {

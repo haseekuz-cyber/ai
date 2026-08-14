@@ -177,7 +177,7 @@ function publicSnapshot(observer) {
     changedFraction: frame?.changedFraction ?? 0,
     importance: frame?.importance ?? null,
     changedRegions: frame ? coalesceChangedCells(frame.changedCells, frame.columns, frame.rows) : [],
-    temporalKeyframes: selectTemporalKeyframePaths(observer.keyframes, { limit: 3 }).length,
+    temporalKeyframes: selectTemporalKeyframePaths(observer.keyframes, { limit: 2 }).length,
     framesObserved: observer.framesObserved,
     significantEvents: observer.significantEvents,
     error: observer.error
@@ -430,7 +430,9 @@ export class WindowEventObserver extends EventEmitter {
     this.stopping = true;
     const child = this.child;
     this.child = null;
-    if (child) child.kill();
+    if (child && child.exitCode === null && !child.killed) {
+      try { child.kill(); } catch { }
+    }
     this.status = 'idle';
     this.mode = 'idle';
     this.currentIntervalMs = this.intervalMs;

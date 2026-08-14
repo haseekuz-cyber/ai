@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveCaptureTarget } from '../src/screen-boundary.mjs';
+import { intersectBounds, resolveCaptureTarget } from '../src/screen-boundary.mjs';
 
 test('the only secondary display becomes the default AI monitor', () => {
   const target = resolveCaptureTarget({
@@ -25,4 +25,28 @@ test('multiple secondary displays still require an explicit assignment', () => {
       ]
     }
   }), /multiple secondary displays/);
+});
+
+test('vision can cover the whole display while execution is clipped to the visible application surface', () => {
+  assert.deepEqual(
+    intersectBounds(
+      { x: 1920, y: 0, width: 1920, height: 1080 },
+      { x: 1912, y: -8, width: 1936, height: 1096 }
+    ),
+    { x: 1920, y: 0, width: 1920, height: 1080 }
+  );
+  assert.deepEqual(
+    intersectBounds(
+      { x: 1920, y: 0, width: 1920, height: 1080 },
+      { x: 2300, y: 100, width: 900, height: 700 }
+    ),
+    { x: 2300, y: 100, width: 900, height: 700 }
+  );
+});
+
+test('execution refuses a surface that is outside the assigned display', () => {
+  assert.throws(() => intersectBounds(
+    { x: 1920, y: 0, width: 1920, height: 1080 },
+    { x: 0, y: 0, width: 1000, height: 800 }
+  ), /outside the assigned AI display/);
 });

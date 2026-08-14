@@ -9,7 +9,7 @@ import { readJson, sendJson } from './http-utils.mjs';
 import { isAuthorized, normalizeTask } from './protocol.mjs';
 import { collectWindowsDiagnostics } from './windows-diagnostics.mjs';
 import { evaluateCompatibility } from './compatibility.mjs';
-import { resolveCaptureTarget } from './screen-boundary.mjs';
+import { intersectBounds, resolveCaptureTarget } from './screen-boundary.mjs';
 import { captureDisplay } from './screen-capture.mjs';
 import { captureWindow } from './window-capture.mjs';
 import { createBoundedUiRequest, resolveUiAutomationDisplay, runUiAutomation } from './uia-bridge.mjs';
@@ -2489,9 +2489,10 @@ const server = http.createServer(async (request, response) => {
         })
       );
       const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+      const executionBounds = intersectBounds(display.bounds, inspected.window.bounds);
       const bridgeRequest = createBoundedPointerRequest({
         action,
-        allowedBounds: display.bounds,
+        allowedBounds: executionBounds,
         forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
       });
       const pointerPoint = action.action === 'drag' ? action.to : action.point;
@@ -2804,11 +2805,7 @@ const server = http.createServer(async (request, response) => {
         return sendJson(response, 200, { planId: plan.planId, actionsPerformed: false, done: true, proposal: plan.proposal });
       }
 
-      const inspected = await runUiAutomation(
-        config.uiaScript,
-        boundedUiRequest({ operation: 'inspect', windowHandle: plan.window.nativeWindowHandle, maxDepth: 0, maxElements: 1 }),
-        { timeoutMs: 30_000 }
-      );
+      const inspected = await inspectPlanningSurface(plan.window.nativeWindowHandle);
       const freshness = assessPlanWindow({ plans: actionPlans, plan, currentWindow: inspected.window });
       if (freshness.status !== 'fresh') {
         await discardMissionMiniPlan(executionMission, 'pre_action_window_changed', { planId: plan.planId });
@@ -2853,9 +2850,13 @@ const server = http.createServer(async (request, response) => {
           await new Promise((resolve) => setTimeout(resolve, plan.proposal.action.durationMs));
         } else {
           const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+          const executionBounds = intersectBounds(
+            display.bounds,
+            inspected.activeSurface?.bounds || inspected.window.bounds
+          );
           const bridgeRequest = createBoundedPointerRequest({
             action: plan.pointerAction,
-            allowedBounds: display.bounds,
+            allowedBounds: executionBounds,
             forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
           });
           pointerPoint = bridgeRequest.action === 'drag' ? bridgeRequest.to : bridgeRequest.point;
@@ -4184,9 +4185,10 @@ const server = http.createServer(async (request, response) => {
         }
         if (!actionResult) {
           const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+          const executionBounds = intersectBounds(display.bounds, inspected.window.bounds);
           const bridgeRequest = createBoundedPointerRequest({
             action: pointerAction,
-            allowedBounds: display.bounds,
+            allowedBounds: executionBounds,
             forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
           });
           actionResult = await runPointerAction(config.pointerBridgeScript, bridgeRequest, { timeoutMs: 10_000 });

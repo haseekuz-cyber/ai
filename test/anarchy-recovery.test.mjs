@@ -72,3 +72,14 @@ test('an infrastructure capture failure stops retries and is never learned as a 
   assert.equal(decision.delayMs, null);
   assert.match(decision.report, /технического слоя/);
 });
+
+test('an image crop failure is infrastructure and never becomes UI guidance', () => {
+  const decision = decideAnarchyRecovery(createAnarchyRecoveryState(), {
+    missionId: 'mission-1',
+    errorCode: 'image_crop_failed',
+    message: 'crop-image-region.ps1 failed'
+  });
+  assert.equal(decision.action, 'infrastructure_error');
+  assert.equal(decision.shouldRecordCorrection, false);
+  assert.equal(decision.delayMs, null);
+});

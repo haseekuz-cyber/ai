@@ -148,6 +148,11 @@ export function causalReplayReadiness(skill, { minimumConfidence = 0.55 } = {}) 
   if (!clean(skill?.visualReference?.imagePath)) reasons.push('final_visual_reference_missing');
   if (!Array.isArray(skill?.steps) || skill.steps.length === 0) reasons.push('recorded_steps_missing');
   if ((skill?.steps || []).some((step) => !supportedStepTypes.has(step?.type))) reasons.push('unsupported_recorded_step');
+  if ((skill?.steps || []).some((step) =>
+    step?.type === 'drag' && Array.isArray(step.modifiers) && step.modifiers.length > 0 &&
+    (!Array.isArray(step.trajectory) || step.trajectory.length < 2))) {
+    reasons.push('modified_drag_trajectory_missing');
+  }
   return { ready: reasons.length === 0, reasons, minimumConfidence };
 }
 
