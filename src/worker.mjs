@@ -1,9 +1,7 @@
 import http from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { config } from './config.mjs';
 import { readJson, sendJson } from './http-utils.mjs';
 import { isAuthorized, normalizeTask } from './protocol.mjs';
@@ -21,6 +19,7 @@ import {
   analyzeImageWithLmStudio,
   analyzeImagesWithLmStudio,
   analyzeTextWithLmStudio,
+  configureLmStudioRequestBroker,
   getLmStudioStatus,
   normalizeVisionPrompt
 } from './lmstudio-client.mjs';
@@ -51,6 +50,7 @@ import {
   waitForFile
 } from './teaching.mjs';
 import {
+  createSkillRunState,
   learnedStepToPointerAction,
   groundLearnedStepToElements,
   normalizeSkillId,
@@ -58,6 +58,7 @@ import {
   validateSkillForWindow
 } from './skill-runner.mjs';
 import { compileCausalReplaySkill, executableSkillSteps } from './causal-skill.mjs';
+import { activateExclusiveLmStudioModel } from './lmstudio-runtime.mjs';
 import { partitionObservationEvents, selectFinalMeaningfulFrame } from './observation-guidance.mjs';
 import { isHumanApprovedCorrectionPlan, plannerProposalAsCorrectionSteps, replaceSkillStep } from './skill-correction.mjs';
 import { appendAuditEvent, readAuditEvents } from './audit-log.mjs';
@@ -148,6 +149,8 @@ import {
 } from './teacher-learning.mjs';
 import {
   extractPublicHttpsUrls,
+  readLearningMaterials,
+  retrieveLearningMaterials,
   readPublicLearningMaterial,
   researchPublicWeb,
   saveLearningMaterial
@@ -163,6 +166,19 @@ import {
   OBSERVATION_COMPILER_SYSTEM_PROMPT,
   selectObservationKeyframes
 } from './experience-compiler.mjs';
+import { buildErrorPacket, listErrorPackets, persistErrorPacket } from './error-packet.mjs';
+import { routeIntervention } from './intervention-router.mjs';
+import { ModelBroker } from './model-broker.mjs';
+import {
+  compareCandidateRuns,
+  persistImprovementRecord
+} from './self-improvement.mjs';
+import {
+  applyCodeCandidate,
+  createCodeCandidate,
+  rollbackCodeCandidate,
+  runCandidateTests
+} from './code-candidate.mjs';
 
 let diagnostics;
 let diagnosticsError;
@@ -181,7 +197,6 @@ let safetyUpdatedAt = new Date().toISOString();
 let auditError = null;
 let safetyHotkey = null;
 let safetyHotkeyError = null;
-const execFileAsync = promisify(execFile);
 const windowObserver = config.eventObserverEnabled
   ? new WindowEventObserver({
     scriptPath: config.windowObserverScript,
@@ -197,6 +212,23 @@ let interfaceRefreshTimer = null;
 let interfaceRefreshPromise = null;
 let observerBackgroundTimer = null;
 let workerShutdownInProgress = false;
+const modelBroker = new ModelBroker({
+  enabled: config.modelBrokerEnabled,
+  idleTtlMs: config.modelIdleTtlMs,
+  initialModel: config.lmStudioModel,
+  onSwitch: ({ model }) => activateExclusiveLmStudioModel({
+    baseUrl: config.lmStudioBaseUrl,
+    model
+  }),
+  roles: {
+    vision: config.visionModel,
+    planner: config.plannerModel,
+    critic: config.criticModel,
+    coder: config.coderModel,
+    embeddings: config.embeddingModel
+  }
+});
+configureLmStudioRequestBroker(modelBroker);
 
 function recordInterfaceInspection(inspected, source) {
   const sameWindow = interfaceState?.window?.nativeWindowHandle === inspected?.window?.nativeWindowHandle;
@@ -364,7 +396,7 @@ async function compareSkillVisualReference(skill, currentObservation) {
     await fs.access(referencePath);
     const comparisonVision = await analyzeImagesWithLmStudio({
       baseUrl: config.lmStudioBaseUrl,
-      model: config.lmStudioModel,
+      model: config.visionModel,
       imagePaths: [referencePath, currentObservation.outputPath],
       systemPrompt: REFERENCE_COMPARATOR_SYSTEM_PROMPT,
       prompt: `Навык: ${skill.instruction}\nСравни итог выполнения с финальным результатом пользовательской демонстрации. Первое изображение — референс, второе — текущий результат.`,
@@ -395,7 +427,7 @@ async function compareSkillStepReference(skill, step, currentObservation) {
     await fs.access(referencePath);
     const comparisonVision = await analyzeImagesWithLmStudio({
       baseUrl: config.lmStudioBaseUrl,
-      model: config.lmStudioModel,
+      model: config.visionModel,
       imagePaths: [referencePath, currentObservation.outputPath],
       systemPrompt: STEP_REFERENCE_COMPARATOR_SYSTEM_PROMPT,
       prompt: `Навык: ${skill.instruction}\nШаг: ${JSON.stringify(publicLearnedStep(step))}\nОжидаемый результат: ${step.expectedResult || 'тот же локальный видимый результат, что в демонстрации'}.`,
@@ -414,7 +446,7 @@ async function reviewPlanWithTeacher({ observation, instruction, proposal, histo
   const profile = await readTeacherProfile(config.teacherProfilePath);
   const vision = await analyzeImageWithLmStudio({
     baseUrl: config.lmStudioBaseUrl,
-    model: config.teacherModel,
+    model: config.criticModel,
     imagePath: observation.outputPath,
     systemPrompt: LIVE_TEACHER_SYSTEM_PROMPT,
     prompt: buildTeacherReviewPrompt({
@@ -497,38 +529,52 @@ async function buildTeacherProjectContext(message, mode = 'chat') {
 }
 
 async function runTeacherTests(workingDirectory) {
-  try {
-    const result = await execFileAsync(process.execPath, ['--test'], {
-      cwd: workingDirectory,
-      timeout: 120_000,
-      maxBuffer: 2 * 1024 * 1024,
-      windowsHide: true
-    });
-    return { passed: true, command: 'node --test', output: `${result.stdout || ''}${result.stderr || ''}`.slice(-6_000) };
-  } catch (error) {
-    return {
-      passed: false,
-      command: 'node --test',
-      output: `${error.stdout || ''}${error.stderr || ''}${error.message || ''}`.slice(-6_000)
-    };
-  }
+  const result = await runCandidateTests(workingDirectory);
+  return { ...result, output: result.output.slice(-6_000) };
 }
 
 async function testTeacherProposalInSandbox(proposalId, prepared) {
-  const sandboxPath = path.resolve(config.teacherSandboxDirectory, proposalId);
-  await fs.mkdir(config.teacherSandboxDirectory, { recursive: true });
-  await fs.cp(config.projectRoot, sandboxPath, {
-    recursive: true,
-    filter: (source) => {
-      const relative = path.relative(config.projectRoot, source);
-      if (!relative) return true;
-      const parts = relative.split(path.sep);
-      return !parts.some((part) => ['.git', 'runtime', 'node_modules', 'artifacts', '__pycache__'].includes(part)) &&
-        !/\.(?:exe|pyc)$/i.test(source);
-    }
+  const { candidatePath: sandboxPath } = await createCodeCandidate({
+    projectRoot: config.projectRoot,
+    candidateRoot: config.teacherSandboxDirectory,
+    proposalId
   });
   await applyPreparedTeacherEdits(prepared, sandboxPath);
   return { ...(await runTeacherTests(sandboxPath)), sandboxPath };
+}
+
+function improvementRecord(proposal, status = proposal.status || 'tested', result = proposal.result || null) {
+  return {
+    schemaVersion: 1,
+    proposalId: proposal.proposalId,
+    status,
+    createdAt: proposal.createdAt,
+    updatedAt: new Date().toISOString(),
+    files: proposal.edits.map((edit) => ({
+      path: edit.relativePath,
+      operation: edit.operation,
+      reason: edit.reason,
+      candidateSha256: createHash('sha256').update(edit.content).digest('hex'),
+      originalSha256: edit.original == null ? null : createHash('sha256').update(edit.original).digest('hex')
+    })),
+    baseline: proposal.baseline,
+    sandbox: proposal.sandbox,
+    evaluation: proposal.evaluation,
+    result
+  };
+}
+
+async function teacherProposalDrift(proposal, expectedState = 'base') {
+  const drifted = [];
+  for (const edit of proposal.edits) {
+    let current = null;
+    try { current = await fs.readFile(edit.absolutePath, 'utf8'); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const expected = expectedState === 'applied' ? edit.content : edit.original;
+    if (current !== expected) drifted.push(edit.relativePath);
+  }
+  return drifted;
 }
 
 async function saveTeacherScreenshot(dataUrl) {
@@ -543,30 +589,21 @@ async function saveTeacherScreenshot(dataUrl) {
 }
 
 async function applyTeacherProposal(proposal) {
-  const prepared = await prepareTeacherEdits(config.projectRoot, proposal.edits);
-  const backupPath = path.resolve(config.teacherBackupDirectory, proposal.proposalId);
-  await fs.mkdir(backupPath, { recursive: true });
-  for (const edit of prepared) {
-    if (edit.original == null) continue;
-    const backupFile = path.resolve(backupPath, ...edit.relativePath.split('/'));
-    await fs.mkdir(path.dirname(backupFile), { recursive: true });
-    await fs.writeFile(backupFile, edit.original, 'utf8');
-  }
-  await fs.writeFile(path.join(backupPath, 'manifest.json'), JSON.stringify({
+  return applyCodeCandidate({
+    projectRoot: config.projectRoot,
     proposalId: proposal.proposalId,
-    createdAt: new Date().toISOString(),
-    files: prepared.map((edit) => ({ path: edit.relativePath, created: edit.original == null }))
-  }, null, 2), 'utf8');
-  await applyPreparedTeacherEdits(prepared);
-  const tests = await runTeacherTests(config.projectRoot);
-  if (!tests.passed) {
-    for (const edit of prepared) {
-      if (edit.original == null) await fs.rm(edit.absolutePath, { force: true });
-      else await fs.writeFile(edit.absolutePath, edit.original, 'utf8');
-    }
-    return { applied: false, rolledBack: true, tests, backupPath };
-  }
-  return { applied: true, rolledBack: false, tests, backupPath };
+    edits: proposal.edits.map((edit) => ({
+      path: edit.relativePath,
+      original: edit.original,
+      content: edit.content
+    })),
+    baselineRun: proposal.baseline,
+    candidateRun: proposal.sandbox,
+    evaluation: proposal.evaluation,
+    backupRoot: config.teacherBackupDirectory,
+    confirmed: true,
+    testRunner: runTeacherTests
+  });
 }
 
 function exploratoryVisualFallback(planned, visualRefinement, evidence = '') {
@@ -666,7 +703,7 @@ async function refinePlannedTarget({ planned, observation, instruction, allowUnv
   try {
     const refinementVision = await analyzeImageWithLmStudio({
       baseUrl: config.lmStudioBaseUrl,
-      model: config.lmStudioModel,
+      model: config.visionModel,
       imagePath: crop.outputPath,
       systemPrompt: textFieldRefinement ? FIELD_REFINER_SYSTEM_PROMPT : POINTER_REFINER_SYSTEM_PROMPT,
       prompt: textFieldRefinement
@@ -756,7 +793,7 @@ async function recoverSurfaceGesture({ planned, observation, instruction }) {
   if (!isSurfaceGestureCandidate({ instruction, proposal: planned?.proposal })) return null;
   const vision = await analyzeImageWithLmStudio({
     baseUrl: config.lmStudioBaseUrl,
-    model: config.lmStudioModel,
+    model: config.visionModel,
     imagePath: observation.outputPath,
     systemPrompt: SURFACE_GESTURE_REFINER_SYSTEM_PROMPT,
     prompt: `Задача: ${instruction}\nПочему нужен жест: ${planned.proposal.reason}\nОжидаемый результат: ${planned.proposal.expectedResult}\nНайди безопасную видимую область редактирования и верни один drag внутри неё.`,
@@ -805,7 +842,7 @@ async function recoverSurfaceClick({ planned, observation, instruction }) {
   if (!isSurfaceClickCandidate({ proposal: planned?.proposal })) return null;
   const vision = await analyzeImageWithLmStudio({
     baseUrl: config.lmStudioBaseUrl,
-    model: config.lmStudioModel,
+    model: config.visionModel,
     imagePath: observation.outputPath,
     systemPrompt: SURFACE_POINT_REFINER_SYSTEM_PROMPT,
     prompt: `Задача: ${instruction}\nПочему нужен клик: ${planned.proposal.reason}\nОжидаемый результат: ${planned.proposal.expectedResult}\nПодтверди рабочую поверхность по полному экрану и верни безопасную точку только внутри неё.`,
@@ -846,7 +883,7 @@ async function recoverSurfaceText({ planned, observation, instruction }) {
   if (!isSurfaceTextCandidate({ proposal: planned?.proposal })) return null;
   const vision = await analyzeImageWithLmStudio({
     baseUrl: config.lmStudioBaseUrl,
-    model: config.lmStudioModel,
+    model: config.visionModel,
     imagePath: observation.outputPath,
     systemPrompt: SURFACE_POINT_REFINER_SYSTEM_PROMPT,
     prompt: `Задача: ${instruction}\nНужно создать новый текстовый объект: ${planned.proposal.reason}\nОжидаемый результат: ${planned.proposal.expectedResult}\nПодтверди видимую рабочую поверхность и верни безопасную точку внутри неё для установки текстового курсора.`,
@@ -929,6 +966,30 @@ async function loadSkill(skillId) {
   const skillPath = path.join(config.skillsDirectory, `${normalizedId}.json`);
   const stored = JSON.parse(await fs.readFile(skillPath, 'utf8'));
   return { skill: compileCausalReplaySkill(stored), skillPath };
+}
+
+async function recordWorkerError(error, context = {}) {
+  try {
+    if (error?.errorPacketId) return { errorId: error.errorPacketId, intervention: error.intervention || null };
+    const packet = buildErrorPacket(error, context);
+    const intervention = routeIntervention(packet, context.interventionEvidence || {});
+    const packetPath = await persistErrorPacket(config.errorPacketsDirectory, { ...packet, recommendedIntervention: intervention });
+    if (error && typeof error === 'object') {
+      error.errorPacketId = packet.errorId;
+      error.intervention = intervention;
+    }
+    await audit('self_improvement.error_recorded', {
+      errorId: packet.errorId,
+      fingerprint: packet.fingerprint,
+      category: packet.category,
+      intervention: intervention.intervention,
+      packetPath
+    });
+    return { errorId: packet.errorId, intervention, packetPath };
+  } catch (recordingError) {
+    await audit('self_improvement.error_record_failed', { message: String(recordingError.message || recordingError).slice(0, 400) });
+    return null;
+  }
 }
 
 async function loadAllSkills() {
@@ -1057,7 +1118,7 @@ async function compilePassiveObservation({ skill, beforeObservation, afterObserv
   try {
     vision = await analyzeImagesWithLmStudio({
       baseUrl: config.lmStudioBaseUrl,
-      model: config.teacherModel,
+      model: config.visionModel,
       imagePaths: selectedImagePaths,
       systemPrompt: OBSERVATION_COMPILER_SYSTEM_PROMPT,
       prompt: compilerPrompt,
@@ -1071,7 +1132,7 @@ async function compilePassiveObservation({ skill, beforeObservation, afterObserv
     contextFallbackUsed = true;
     vision = await analyzeImagesWithLmStudio({
       baseUrl: config.lmStudioBaseUrl,
-      model: config.teacherModel,
+      model: config.visionModel,
       imagePaths: selectedImagePaths,
       systemPrompt: OBSERVATION_COMPILER_SYSTEM_PROMPT,
       prompt: compilerPrompt,
@@ -1261,7 +1322,7 @@ function visionCapability() {
     enabled: config.visionEnabled,
     provider: 'LM Studio',
     baseUrl: config.lmStudioBaseUrl,
-    model: config.lmStudioModel,
+    model: config.visionModel,
     mode: 'read-only-analysis',
     actionsAllowed: false
   };
@@ -1535,7 +1596,7 @@ async function tryCreateQueuedMiniPlanActionPlan({ mission, inspected, observati
   });
   return {
     plan,
-    vision: { model: config.lmStudioModel, stats: null, cachedMiniPlan: true }
+    vision: { model: config.plannerModel, stats: null, cachedMiniPlan: true }
   };
 }
 
@@ -1572,7 +1633,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     const result = temporalImagePaths.length > 1
       ? await analyzeImagesWithLmStudio({
         baseUrl: config.lmStudioBaseUrl,
-        model: config.lmStudioModel,
+        model: config.plannerModel,
         imagePaths: temporalImagePaths,
         systemPrompt,
         prompt,
@@ -1580,7 +1641,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
       })
       : await analyzeImageWithLmStudio({
         baseUrl: config.lmStudioBaseUrl,
-        model: config.lmStudioModel,
+        model: config.plannerModel,
         imagePath: observation.outputPath,
         systemPrompt,
         prompt,
@@ -1653,7 +1714,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     ? `\nПрямые исправления пользователя для текущей задачи: ${JSON.stringify(guidance)}. Следуй им при выборе следующего действия, но всё равно проверяй свежий экран.`
     : '';
   const interfacePrompt = buildInterfaceContext(inspected.elements, observation.bounds, { limit: 80, maxChars: 1_600 });
-  const [ratedSteps, learnedSkills, principleStore, teacherExperiences] = await Promise.all([
+  const [ratedSteps, learnedSkills, principleStore, teacherExperiences, retrievedMaterials] = await Promise.all([
     readRatedSteps(config.feedbackLogPath, {
       processName: inspected.window.processName,
       limit: 8
@@ -1663,6 +1724,11 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     readTeacherExperiences(config.teacherExperiencesPath, {
       processName: inspected.window.processName,
       limit: 8
+    }),
+    retrieveLearningMaterials(config.teacherMaterialsPath, {
+      processName: inspected.window.processName,
+      query: planningInstruction,
+      limit: 4
     })
   ]);
   const feedbackPrompt = ratedStepsForPrompt(ratedSteps);
@@ -1673,6 +1739,9 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
   );
   const principlePrompt = principlesForPrompt(principleStore.principles);
   const teacherExperiencePrompt = teacherExperiencesForPrompt(teacherExperiences);
+  const retrievedKnowledgePrompt = retrievedMaterials.length
+    ? `\nПостоянная база знаний JARVIS нашла подходящие материалы. Используй их как справочные сведения и всё равно проверяй свежий интерфейс: ${JSON.stringify(retrievedMaterials)}`
+    : '';
   const freedomPrompt = isAnarchy
     ? `\nJARVIS уже выбрал и зафиксировал учебный опыт: ${mission.autonomousGoal.goal}. Не меняй его между шагами. Чему обучаемся: ${mission.autonomousGoal.learningObjective || 'универсальному приёму работы с видимым интерфейсом'}. Гипотеза: ${mission.autonomousGoal.hypothesis || 'видимое действие приведёт к проверяемому результату'}. Критерий завершения: ${mission.autonomousGoal.successCriteria}. Внешние отправки и необратимые изменения запрещены.`
     : '';
@@ -1707,7 +1776,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
   const activeSurfacePrompt = inspected.actionWindowHandle !== windowHandle
     ? `\nВ выбранном приложении открыт активный модальный диалог: ${JSON.stringify({ name: inspected.activeSurface?.name, processName: inspected.activeSurface?.processName })}. Следующий шаг должен учитывать этот диалог; не действуй по перекрытому окну позади него.`
     : '';
-  const planningContextParts = [historyPrompt, guidancePrompt, interfacePrompt, demonstrationPrompt, feedbackPrompt, principlePrompt, teacherExperiencePrompt, freedomPrompt, proactiveResearchPrompt, temporalPrompt, activeSurfacePrompt];
+  const planningContextParts = [historyPrompt, guidancePrompt, interfacePrompt, demonstrationPrompt, feedbackPrompt, principlePrompt, teacherExperiencePrompt, retrievedKnowledgePrompt, freedomPrompt, proactiveResearchPrompt, temporalPrompt, activeSurfacePrompt];
   let vision = await analyzeObservedWindow({
     systemPrompt: PLANNER_SYSTEM_PROMPT,
     prompt: buildBoundedPlannerPrompt({
@@ -2026,15 +2095,9 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     } : null;
   }
   actionPlans.set(planId, plan);
-  const previewPoint = pointerAction?.action === 'drag' ? pointerAction.to : pointerAction?.point;
-  if (previewPoint && config.pointerOverlayEnabled) {
-    await moveVirtualPointer(config.pointerStatePath, previewPoint, {
-      message: isAnarchy
-        ? `Цель: ${mission.autonomousGoal.goal}. Сейчас: ${proposal.reason || 'предлагаю следующий шаг'}`
-        : proposal.reason || 'Предлагаю следующий шаг',
-      tone: policy.allowExecution ? 'working' : 'warning'
-    });
-  }
+  // Moving the overlay here changes the captured display and invalidates the
+  // agent's own otherwise-fresh plan. Move it only immediately before the
+  // physical action, after all freshness checks have passed.
   await audit('plan.created', {
     planId, missionId: plan.missionId, action: proposal.action.type, windowHandle,
     processName: inspected.window?.processName || null,
@@ -2127,14 +2190,16 @@ try {
 }
 
 const server = http.createServer(async (request, response) => {
+  let requestUrl = null;
   try {
     if (!isAuthorized(request.headers.authorization, config.authToken)) {
       return sendJson(response, 401, { error: 'unauthorized' });
     }
 
     const url = new URL(request.url, `http://${config.host}:${config.workerPort}`);
+    requestUrl = url;
 
-    if (request.method === 'GET' && url.pathname === '/health') {
+      if (request.method === 'GET' && url.pathname === '/health') {
       return sendJson(response, 200, {
         status: diagnosticsError ? 'degraded' : 'ready',
         autonomousExecutionLocked: false,
@@ -2156,6 +2221,15 @@ const server = http.createServer(async (request, response) => {
           queuedActionTypes: ['click', 'doubleClick', 'typeText'],
           postActionValidationRequired: true,
           postActionValidationRoutes: ['uia_postcondition', 'event_stream_no_change', 'qwen_vision']
+        },
+        modelBroker: modelBroker.status(),
+        selfImprovement: {
+          automaticWorkingTreeEdits: false,
+          confirmationRequired: true,
+          baselineComparisonRequired: true,
+          rollbackAvailable: true,
+          errorPacketsDirectory: config.errorPacketsDirectory,
+          candidatesDirectory: config.improvementDirectory
         },
         pointerOverlay: {
           enabled: config.pointerOverlayEnabled,
@@ -2318,7 +2392,7 @@ const server = http.createServer(async (request, response) => {
       const observation = await captureAssignedDisplayFrame(outputPath);
       const vision = await analyzeImageWithLmStudio({
         baseUrl: config.lmStudioBaseUrl,
-        model: config.lmStudioModel,
+        model: config.visionModel,
         imagePath: observation.outputPath,
         prompt: analysisPrompt
       });
@@ -2385,6 +2459,12 @@ const server = http.createServer(async (request, response) => {
         ...result,
         display: uiAutomationCapability()
       });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/self-improvement/errors') {
+      const requestedLimit = Number(url.searchParams.get('limit')) || 20;
+      const packets = await listErrorPackets(config.errorPacketsDirectory, { limit: Math.min(100, Math.max(1, requestedLimit)) });
+      return sendJson(response, 200, { packets, count: packets.length });
     }
 
     if (request.method === 'POST' && url.pathname === '/observation/watch') {
@@ -2909,6 +2989,17 @@ const server = http.createServer(async (request, response) => {
           pointer: summarizePointerRequest(plan.pointerAction),
           pointerError: error.details || null
         });
+        await recordWorkerError(error, {
+          phase: 'executor',
+          mission,
+          application: { processName: plan.window.processName, name: plan.window.name },
+          window: plan.window,
+          action: plan.proposal.action,
+          expectedResult: plan.proposal.expectedResult,
+          actualResult: 'Physical action failed before post-action validation.',
+          evidence: { planId: plan.planId, pointerError: error.details || null },
+          versions: { worker: '0.1.0', model: config.plannerModel }
+        });
         throw error;
       }
 
@@ -2951,7 +3042,7 @@ const server = http.createServer(async (request, response) => {
       if (validationDecision.route === 'vision') {
         validationVision = await analyzeImageWithLmStudio({
           baseUrl: config.lmStudioBaseUrl,
-          model: config.lmStudioModel,
+          model: config.visionModel,
           imagePath: afterObservation.outputPath,
           systemPrompt: VALIDATOR_SYSTEM_PROMPT,
           prompt: `Задача: ${plan.instruction}\nВыполненное действие: ${JSON.stringify(plan.proposal.action)}\nОжидаемый видимый результат: ${plan.proposal.expectedResult}`,
@@ -2983,7 +3074,7 @@ const server = http.createServer(async (request, response) => {
         try {
           const focusedVision = await analyzeImageWithLmStudio({
             baseUrl: config.lmStudioBaseUrl,
-            model: config.lmStudioModel,
+            model: config.visionModel,
             imagePath: focusedCrop.outputPath,
             systemPrompt: FOCUSED_VALIDATOR_SYSTEM_PROMPT,
             prompt: `Выполненное действие: ${JSON.stringify(plan.proposal.action)}\nОжидаемый локальный результат: ${plan.proposal.expectedResult}\nПроверь только прямое видимое состояние элемента в увеличенной области клика.`,
@@ -3029,6 +3120,32 @@ const server = http.createServer(async (request, response) => {
         limitations: validation.limitations,
         source: validationSource
       };
+      if (validation.success !== true) {
+        const validationError = Object.assign(
+          new Error(validation.evidence || 'The expected visible result was not observed.'),
+          { code: 'expected_result_not_observed' }
+        );
+        const recorded = await recordWorkerError(validationError, {
+          phase: 'post_action_validation',
+          mission: plan.missionId ? missions.get(plan.missionId) : null,
+          application: { processName: plan.window.processName, name: plan.window.name },
+          window: plan.window,
+          action: plan.proposal.action,
+          expectedResult: plan.proposal.expectedResult,
+          actualResult: validation.evidence,
+          evidence: {
+            planId: plan.planId,
+            validationSource,
+            confidence: validation.confidence,
+            settling,
+            beforeSha256: preActionObservation.sha256,
+            afterSha256: afterObservation.sha256
+          },
+          versions: { worker: '0.1.0', plannerModel: config.plannerModel, visionModel: config.visionModel }
+        });
+        plan.validation.errorId = recorded?.errorId || null;
+        plan.validation.recommendedIntervention = recorded?.intervention || null;
+      }
       plan.afterScreenshot = afterObservation.outputPath;
       const mission = plan.missionId ? missions.get(plan.missionId) : null;
       if (mission) {
@@ -3062,7 +3179,8 @@ const server = http.createServer(async (request, response) => {
             userMessage: plan.instruction,
             currentTask: plan.instruction
           })) {
-            jarvisLearning = await appendTeacherExperience(config.teacherExperiencesPath, learned);
+            plan.learningCandidate = learned;
+            jarvisLearning = { ...learned, status: 'awaiting_human_feedback', verifiedByUser: false };
           }
         } catch (error) {
           await audit('jarvis.learning_skipped', {
@@ -3082,7 +3200,7 @@ const server = http.createServer(async (request, response) => {
         settlingElapsedMs: settling.elapsedMs
       });
       if (jarvisLearning) {
-        await audit('jarvis.experience_learned', {
+        await audit('jarvis.experience_candidate_created', {
           planId: plan.planId,
           updateId: jarvisLearning.updateId,
           type: jarvisLearning.type,
@@ -3119,6 +3237,7 @@ const server = http.createServer(async (request, response) => {
       }
 
       let record;
+      let promotedTeacherExperience = null;
       let mission = null;
       let run = null;
       if (typeof input.planId === 'string' && input.planId) {
@@ -3130,6 +3249,14 @@ const server = http.createServer(async (request, response) => {
           return sendJson(response, 409, { error: 'step_not_executed', message: 'Only a completed step can be rated.' });
         }
         record = buildPlanFeedback({ plan, rating, feedbackId: randomUUID() });
+        if (rating === 'positive' && plan.learningCandidate) {
+          promotedTeacherExperience = await appendTeacherExperience(config.teacherExperiencesPath, {
+            ...plan.learningCandidate,
+            verifiedByUser: true,
+            verifiedAt: new Date().toISOString(),
+            sourceFeedbackId: record.feedbackId
+          });
+        }
         plan.humanFeedback = rating;
         mission = plan.missionId ? missions.get(plan.missionId) : null;
         if (mission?.history.length) {
@@ -3189,7 +3316,9 @@ const server = http.createServer(async (request, response) => {
         created: saved.created
       });
       return sendJson(response, saved.created ? 201 : 200, {
-        learned: true,
+        learned: saved.record.experience?.state === 'training_approved',
+        experienceState: saved.record.experience?.state || 'legacy',
+        promotedTeacherExperience,
         rating,
         created: saved.created,
         feedback: saved.record,
@@ -3210,7 +3339,9 @@ const server = http.createServer(async (request, response) => {
           principleCount: knowledge.store.principles.length
         },
         message: rating === 'positive'
-          ? 'The successful step will be reused as compact experience.'
+          ? (saved.record.experience?.state === 'training_approved'
+              ? 'The validated and human-approved step is available as compact verified experience.'
+              : 'The positive rating is stored, but the step remains an episode until its result is independently verified.')
           : 'The failed step will be avoided or changed in future plans.'
       });
     }
@@ -3218,6 +3349,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/knowledge/status') {
       const principles = await readPrinciples(config.principlesPath, { limit: 30 });
       const teacherExperiences = await readTeacherExperiences(config.teacherExperiencesPath, { limit: 100 });
+      const learningMaterials = await readLearningMaterials(config.teacherMaterialsPath, { limit: 2_000 });
       return sendJson(response, 200, {
         modelIndependent: true,
         eventLog: config.auditLogPath,
@@ -3225,6 +3357,8 @@ const server = http.createServer(async (request, response) => {
         skillsDirectory: config.skillsDirectory,
         principlesPath: config.principlesPath,
         teacherExperiencesPath: config.teacherExperiencesPath,
+        learningMaterialsPath: config.teacherMaterialsPath,
+        learningMaterialCount: learningMaterials.length,
         teacherExperienceCount: teacherExperiences.length,
         teacherExperiences: teacherExperiences.slice(-30).reverse().map((item) => ({
           updateId: item.updateId,
@@ -3305,7 +3439,14 @@ const server = http.createServer(async (request, response) => {
           for (const suppliedUrl of suppliedUrls) {
             try {
               const material = await readPublicLearningMaterial(suppliedUrl);
-              const stored = await saveLearningMaterial(config.teacherMaterialsPath, material);
+              const stored = await saveLearningMaterial(config.teacherMaterialsPath, {
+                ...material,
+                application: selectedApplication ? {
+                  processName: selectedApplication.processName,
+                  name: selectedApplication.name
+                } : null,
+                addedFor: input.message.slice(0, 500)
+              });
               learningMaterials.push({ ...material, saved: stored.saved });
               researchSources.push(material);
             } catch (error) {
@@ -3339,7 +3480,7 @@ const server = http.createServer(async (request, response) => {
       if (needsDevelopmentPass) {
         const visual = await analyzeImageWithLmStudio({
           baseUrl: config.lmStudioBaseUrl,
-          model: config.teacherModel,
+          model: config.visionModel,
           imagePath: screenshotPath,
           systemPrompt: TEACHER_CHAT_SYSTEM_PROMPT,
           prompt: buildTeacherChatPrompt({ ...basePromptOptions, projectContext: [], screenshot: true, mode: 'chat' }),
@@ -3349,7 +3490,7 @@ const server = http.createServer(async (request, response) => {
         const codeMessage = `${input.message}\n\nАнализ приложенного скриншота: ${visualReply.reply}`;
         teacherVision = await analyzeTextWithLmStudio({
           baseUrl: config.lmStudioBaseUrl,
-          model: config.teacherModel,
+          model: config.coderModel,
           systemPrompt: TEACHER_CHAT_SYSTEM_PROMPT,
           prompt: buildTeacherChatPrompt({ ...basePromptOptions, message: codeMessage, screenshot: false, mode: 'code' }),
           maxOutputTokens: 2_500
@@ -3360,7 +3501,7 @@ const server = http.createServer(async (request, response) => {
         teacherVision = screenshotPath
           ? await analyzeImageWithLmStudio({
               baseUrl: config.lmStudioBaseUrl,
-              model: config.teacherModel,
+              model: config.visionModel,
               imagePath: screenshotPath,
               systemPrompt: TEACHER_CHAT_SYSTEM_PROMPT,
               prompt,
@@ -3368,7 +3509,7 @@ const server = http.createServer(async (request, response) => {
             })
           : await analyzeTextWithLmStudio({
               baseUrl: config.lmStudioBaseUrl,
-              model: config.teacherModel,
+              model: config.criticModel,
               systemPrompt: TEACHER_CHAT_SYSTEM_PROMPT,
               prompt,
               maxOutputTokens: 2_500
@@ -3380,7 +3521,7 @@ const server = http.createServer(async (request, response) => {
       if (programmerRequest && teacherReply.proposedEdits.length === 0 && projectContext.length) {
         const implementationVision = await analyzeTextWithLmStudio({
           baseUrl: config.lmStudioBaseUrl,
-          model: config.teacherModel,
+          model: config.coderModel,
           systemPrompt: TEACHER_CHAT_SYSTEM_PROMPT,
           prompt: buildTeacherChatPrompt({
             ...basePromptOptions,
@@ -3427,32 +3568,34 @@ const server = http.createServer(async (request, response) => {
           const proposalId = randomUUID();
           const prepared = await prepareTeacherEdits(config.projectRoot, teacherReply.proposedEdits);
           validateTeacherProposalArchitecture(prepared);
+          const baseline = await runTeacherTests(config.projectRoot);
           const sandbox = await testTeacherProposalInSandbox(proposalId, prepared);
+          const evaluation = compareCandidateRuns(baseline, sandbox);
           const proposal = {
             proposalId,
-            summary: `JARVIS предложил ${prepared.length} изменение(я). Рабочий проект пока не изменён.`,
+            summary: `JARVIS предложил ${prepared.length} изменение(я). Рабочий проект не изменён: сначала сравните исходную и тестовую версии.`,
             edits: prepared,
+            baseline,
             sandbox,
+            evaluation,
+            status: evaluation.acceptable ? 'tested' : 'rejected',
             createdAt: at
           };
           teacherCodeProposals.set(proposalId, proposal);
+          proposal.recordPath = await persistImprovementRecord(
+            config.improvementDirectory,
+            improvementRecord(proposal)
+          );
           codeProposal = publicTeacherProposal(proposal);
-          if (input.mode === 'jarvis' && sandbox.passed) {
-            codeApplied = await applyTeacherProposal(proposal);
-            if (codeApplied.applied) {
-              teacherCodeProposals.delete(proposalId);
-              codeProposal = null;
-            }
-          }
-          finalReply = `${teacherReply.reply}\n\n${codeApplied?.applied
-            ? 'JARVIS применил проверенное изменение кода. Все тесты рабочего проекта прошли; для серверной части потребуется перезапуск.'
-            : sandbox.passed
-            ? 'Изменение кода прошло тесты в отдельной копии и готово к установке.'
-            : 'Изменение кода не прошло тесты в отдельной копии. Рабочий проект не изменён, применение заблокировано.'}`;
+          finalReply = `${teacherReply.reply}\n\n${evaluation.acceptable
+            ? 'Кандидат прошёл тесты в отдельной копии без регрессии относительно исходной версии. Рабочий код не изменён — установка возможна только по вашей кнопке.'
+            : `Кандидат отклонён сравнением исходной и тестовой версий (${evaluation.reasons.join(', ') || 'unknown'}). Рабочий проект не изменён.`}`;
           await audit('teacher.code_proposed', {
             proposalId,
             files: prepared.map((edit) => edit.relativePath),
-            sandboxPassed: sandbox.passed
+            sandboxPassed: sandbox.passed,
+            evaluationAccepted: evaluation.acceptable,
+            evaluationReasons: evaluation.reasons
           });
         } catch (error) {
           proposalError = error.message;
@@ -3515,22 +3658,82 @@ const server = http.createServer(async (request, response) => {
       }
       const proposal = teacherCodeProposals.get(input.proposalId);
       if (!proposal) return sendJson(response, 404, { error: 'proposal_not_found', message: 'Code proposal expired or does not exist.' });
-      if (!proposal.sandbox?.passed) {
-        return sendJson(response, 409, { error: 'proposal_tests_failed', message: 'JARVIS proposal did not pass sandbox tests and cannot be applied.' });
+      if (proposal.status === 'applied') {
+        return sendJson(response, 409, { error: 'proposal_already_applied', message: 'This proposal is already applied.' });
+      }
+      if (!proposal.sandbox?.passed || proposal.evaluation?.acceptable !== true) {
+        return sendJson(response, 409, { error: 'proposal_tests_failed', message: 'JARVIS proposal did not beat the baseline gate and cannot be applied.' });
+      }
+      const baseDrift = await teacherProposalDrift(proposal, 'base');
+      if (baseDrift.length) {
+        return sendJson(response, 409, {
+          error: 'proposal_base_changed',
+          message: 'The working files changed after the candidate was tested. JARVIS must create and test a fresh proposal.',
+          files: baseDrift
+        });
       }
       const result = await applyTeacherProposal(proposal);
+      proposal.status = result.applied ? 'applied' : 'rolled_back';
+      proposal.result = result;
+      proposal.recordPath = await persistImprovementRecord(
+        config.improvementDirectory,
+        improvementRecord(proposal, proposal.status, result)
+      );
       await audit('teacher.code_applied', {
         proposalId: proposal.proposalId,
         applied: result.applied,
         rolledBack: result.rolledBack,
         files: proposal.edits.map((edit) => edit.relativePath)
       });
-      if (result.applied) teacherCodeProposals.delete(proposal.proposalId);
       return sendJson(response, result.applied ? 200 : 409, {
         ...result,
         proposalId: proposal.proposalId,
         files: proposal.edits.map((edit) => edit.relativePath),
         restartRequired: result.applied
+      });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/teacher/code/rollback') {
+      const input = await readJson(request);
+      if (input.confirmed !== true || typeof input.proposalId !== 'string') {
+        return sendJson(response, 400, { error: 'confirmation_required', message: 'A confirmed proposalId is required for rollback.' });
+      }
+      const proposal = teacherCodeProposals.get(input.proposalId);
+      if (!proposal || proposal.status !== 'applied' || !proposal.result?.backupPath) {
+        return sendJson(response, 404, { error: 'applied_proposal_not_found', message: 'No applied proposal with a recoverable backup was found.' });
+      }
+      const appliedDrift = await teacherProposalDrift(proposal, 'applied');
+      if (appliedDrift.length) {
+        return sendJson(response, 409, {
+          error: 'rollback_base_changed',
+          message: 'Files changed after this proposal was applied. Automatic rollback would overwrite newer work and is blocked.',
+          files: appliedDrift
+        });
+      }
+      const restored = await rollbackCodeCandidate({
+        projectRoot: config.projectRoot,
+        backupPath: proposal.result.backupPath,
+        confirmed: true,
+        testRunner: runTeacherTests
+      });
+      const tests = restored.tests;
+      proposal.status = tests.passed ? 'rolled_back' : 'rollback_needs_review';
+      proposal.result = { ...proposal.result, rollback: { ...restored, tests } };
+      proposal.recordPath = await persistImprovementRecord(
+        config.improvementDirectory,
+        improvementRecord(proposal, proposal.status, proposal.result)
+      );
+      await audit('teacher.code_rolled_back', {
+        proposalId: proposal.proposalId,
+        testsPassed: tests.passed,
+        files: restored.files.map((file) => file.path)
+      });
+      return sendJson(response, tests.passed ? 200 : 409, {
+        proposalId: proposal.proposalId,
+        rolledBack: true,
+        tests,
+        files: restored.files.map((file) => file.path),
+        restartRequired: true
       });
     }
 
@@ -3970,7 +4173,7 @@ const server = http.createServer(async (request, response) => {
       const publicCandidates = candidates.map(publicSkillCandidate);
       const selection = await analyzeTextWithLmStudio({
         baseUrl: config.lmStudioBaseUrl,
-        model: config.lmStudioModel,
+        model: config.plannerModel,
         systemPrompt: SKILL_ROUTER_SYSTEM_PROMPT,
         prompt: `Текущая программа: ${inspected.window.processName}\nЗадача пользователя: ${instruction}\nКандидаты: ${JSON.stringify(publicCandidates)}`,
         maxOutputTokens: 500
@@ -4048,23 +4251,17 @@ const server = http.createServer(async (request, response) => {
           message: `startStepIndex must identify one of ${steps.length} executable steps.`
         });
       }
-      const run = {
+      const run = createSkillRunState({
         runId,
         skill: loaded.skill,
         skillPath: loaded.skillPath,
         steps,
         skillGraph: loaded.skill.skillGraph || null,
-        currentNodeId: loaded.skill.skillGraph?.nodes?.some((node) => node.nodeId === `precondition:${startStepIndex}`)
-          ? `precondition:${startStepIndex}`
-          : null,
+        window: inspected.window,
         windowHandle: input.windowHandle,
-        processId: inspected.window.processId,
-        stepIndex: startStepIndex,
-        status: 'ready',
-        createdAt: new Date(now).toISOString(),
-        expiresAt: new Date(now + 10 * 60 * 1000).toISOString(),
-        expiresAtMs: now + 10 * 60 * 1000
-      };
+        startStepIndex,
+        now
+      });
       skillRuns.set(runId, run);
       return sendJson(response, 201, {
         runId,
@@ -4237,7 +4434,7 @@ const server = http.createServer(async (request, response) => {
       if (validationDecision.route === 'vision') {
         validationVision = await analyzeImageWithLmStudio({
           baseUrl: config.lmStudioBaseUrl,
-          model: config.lmStudioModel,
+          model: config.visionModel,
           imagePath: afterObservation.outputPath,
           systemPrompt: VALIDATOR_SYSTEM_PROMPT,
           prompt: `Выученный навык: ${run.skill.instruction}\nВыполнен шаг: ${JSON.stringify(publicLearnedStep(step))}\nОжидаемый видимый результат: ${step.expectedResult || 'Локальный интерфейс должен видимо измениться согласно демонстрации.'}\nПроверь, что ожидаемый результат действительно появился и интерфейс не показывает ошибку.`,
@@ -4477,9 +4674,16 @@ const server = http.createServer(async (request, response) => {
 
     return sendJson(response, 404, { error: 'not_found' });
   } catch (error) {
+    const recorded = await recordWorkerError(error, {
+      phase: 'http_request',
+      evidence: { method: request.method, path: requestUrl?.pathname || request.url },
+      versions: { worker: '0.1.0', plannerModel: config.plannerModel, visionModel: config.visionModel }
+    });
     return sendJson(response, error.statusCode || 500, {
       error: error.code || 'worker_error',
-      message: error.message
+      message: error.message,
+      errorId: recorded?.errorId || error.errorPacketId || null,
+      recommendedIntervention: recorded?.intervention || error.intervention || null
     });
   }
 });
