@@ -34,8 +34,8 @@ async function callWorker(pathname, options = {}) {
   const response = await fetch(`http://${config.host}:${config.workerPort}${pathname}`, {
     ...fetchOptions,
     headers: {
-      authorization: `Bearer ${config.authToken}`,
-      'content-type': 'application/json',
+      Authorization: `Bearer ${config.authToken}`,
+      'Content-Type': 'application/json',
       ...(options.headers || {})
     },
     signal: AbortSignal.timeout(timeoutMs)
@@ -44,7 +44,6 @@ async function callWorker(pathname, options = {}) {
   const value = await response.json();
   return { status: response.status, value };
 }
-
 async function systemState() {
   const worker = await callWorker('/health');
   const independentControl = evaluateIndependentControl(worker.value);

@@ -4,8 +4,9 @@ import path from 'node:path';
 const token = process.env.AI_WORKSTATION_TOKEN || 'development-local-only';
 const workerPort = process.env.AI_WORKSTATION_WORKER_PORT || '47731';
 const workerBase = `http://127.0.0.1:${workerPort}`;
-const headers = { authorization: `Bearer ${token}` };
-
+const headers = {
+  Authorization: `Bearer ${token}`
+};
 const capabilitiesResponse = await fetch(`${workerBase}/observation/capabilities`, { headers });
 const capabilities = await capabilitiesResponse.json();
 if (!capabilitiesResponse.ok || !capabilities.captureEnabled || !capabilities.boundaryReady) {
