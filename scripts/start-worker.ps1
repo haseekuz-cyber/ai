@@ -85,6 +85,15 @@ if (-not $env:AI_WORKSTATION_TEACHER_SANDBOX) {
 if (-not $env:AI_WORKSTATION_TEACHER_BACKUPS) {
     $env:AI_WORKSTATION_TEACHER_BACKUPS = Join-Path $dataRoot 'TeacherBackups'
 }
+if (-not $env:AI_WORKSTATION_ERROR_PACKETS) {
+    $env:AI_WORKSTATION_ERROR_PACKETS = Join-Path $dataRoot 'SelfImprovement\Errors'
+}
+if (-not $env:AI_WORKSTATION_IMPROVEMENTS) {
+    $env:AI_WORKSTATION_IMPROVEMENTS = Join-Path $dataRoot 'SelfImprovement\Candidates'
+}
+if (-not $env:AI_WORKSTATION_EVALUATIONS) {
+    $env:AI_WORKSTATION_EVALUATIONS = Join-Path $dataRoot 'Evaluations'
+}
 if (-not $env:AI_WORKSTATION_SAFETY_STATE) {
     $env:AI_WORKSTATION_SAFETY_STATE = Join-Path $dataRoot 'State\safety.json'
 }
