@@ -8,24 +8,94 @@ let lmStudioRequestBroker = null;
 const agentContextTokenLimit = Number.isSafeInteger(Number(process.env.AI_WORKSTATION_AGENT_CONTEXT_TOKENS))
  ? Number(process.env.AI_WORKSTATION_AGENT_CONTEXT_TOKENS)
  : config.unifiedAgentContextTokens;
-const maxAgentPromptTokens = Math.max(4_096, Math.floor(agentContextTokenLimit * 0.60));
+// The ContextCompiler already fits the context to 65% of the model window. This
+// outer guard must stay looser than that, otherwise every compiled context is
+// reduced a second time and the compiler's structural work is thrown away.
+const maxAgentPromptTokens = Math.max(4_096, Math.floor(agentContextTokenLimit * 0.70));
+const maxAgentPromptCharacters = Math.min(100_000, maxAgentPromptTokens * 4);
+const stringShorteningLimits = [2_000, 500, 120, 40];
 const truncationRetryFloor = 1_600;
 const truncationRetryCeiling = Math.max(
   truncationRetryFloor,
   Math.min(Number(process.env.AI_WORKSTATION_LM_MAX_OUTPUT_TOKENS) || 4_096, 8_192)
 );
 
-function estimateTextTokens(value) {
- return Math.max(1, Math.ceil(JSON.stringify(value).length / 4));
+function shortenString(value, limit) {
+  if (typeof value !== 'string' || value.length <= limit) return value;
+  return `${value.slice(0, limit)}…[truncated ${value.length - limit} characters]`;
 }
 
-function trimPromptToModelWindow(prompt, maxTokens = maxAgentPromptTokens) {
- const serialized = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
- if (!serialized) return serialized;
- const estimated = estimateTextTokens(serialized);
- if (estimated <= maxTokens) return serialized;
- const targetCharacters = Math.max(1, Math.floor((maxTokens * 4) * 0.9));
- return serialized.slice(0, targetCharacters);
+function shortenLongStrings(value, limit) {
+  if (typeof value === 'string') return shortenString(value, limit);
+  if (Array.isArray(value)) return value.map((entry) => shortenLongStrings(entry, limit));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, shortenLongStrings(entry, limit)]));
+  }
+  return value;
+}
+
+// Slicing the serialized prompt cut JSON in the middle of a structure and, on a
+// format-repair round, cut the repair instruction off entirely. Reduce the
+// context structurally instead, so the model always receives parsable JSON and
+// always sees why its previous answer was rejected.
+function fitAgentPromptToWindow(context, envelope = {}, characterBudget = maxAgentPromptCharacters) {
+  const serialize = (value) => JSON.stringify({ context: value, ...envelope });
+  const original = serialize(context);
+  if (original.length <= characterBudget) return original;
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    return serialize(shortenLongStrings(context, Math.max(40, characterBudget - 200)));
+  }
+
+  const reduction = { reason: 'the context exceeded the agent prompt window and was reduced before the request.' };
+  // `base` keeps the untouched strings so every shortening pass starts from the
+  // original text instead of nesting one truncation marker inside another.
+  const base = { ...context };
+  let shorteningLimit = null;
+  const render = () => ({
+    ...(shorteningLimit === null ? base : shortenLongStrings(base, shorteningLimit)),
+    contextReduction: reduction
+  });
+  const fits = () => serialize(render()).length <= characterBudget;
+
+  // One pathological string must not cost the whole memory and event history,
+  // so the widest shortening pass runs before anything is dropped.
+  const [widestLimit, ...tighterLimits] = stringShorteningLimits;
+  if (JSON.stringify(shortenLongStrings(base, widestLimit)).length < JSON.stringify(base).length) {
+    shorteningLimit = widestLimit;
+    reduction.shortenedStringsOver = widestLimit;
+  }
+
+  if (!fits() && Array.isArray(base.recentEvents) && base.recentEvents.length > 1) {
+    const events = [...base.recentEvents];
+    while (events.length > 1) {
+      events.shift();
+      base.recentEvents = events;
+      if (fits()) break;
+    }
+    reduction.droppedOldestEvents = context.recentEvents.length - events.length;
+  }
+  if (!fits() && Array.isArray(base.relevantMemory) && base.relevantMemory.length > 1) {
+    const memory = [...base.relevantMemory];
+    while (memory.length > 1) {
+      memory.pop();
+      base.relevantMemory = memory;
+      if (fits()) break;
+    }
+    reduction.droppedLeastRelevantMemories = context.relevantMemory.length - memory.length;
+  }
+
+  for (const limit of tighterLimits) {
+    if (fits()) break;
+    shorteningLimit = limit;
+    reduction.shortenedStringsOver = limit;
+  }
+  if (fits()) return serialize(render());
+
+  // Last resort: keep only the pinned block, still as valid JSON.
+  reduction.droppedEverythingExceptPinned = true;
+  const pinnedOnly = { pinned: shortenLongStrings(base.pinned ?? null, 400), contextReduction: reduction };
+  const serialized = serialize(pinnedOnly);
+  return serialized.length <= characterBudget ? serialized : serialize({ contextReduction: reduction });
 }
 
 function trackedRequestSignal(timeoutMs, externalSignal = null) {
@@ -687,18 +757,15 @@ export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOut
     formatError = null
   } = {}) {
     if (responseSchema !== AGENT_DECISION_SCHEMA) throw new TypeError('Unsupported agent decision schema.');
-    const prompt = trimPromptToModelWindow({
-      context,
-      ...(repair ? {
-        formatRepair: {
-          error: String(formatError || 'The prior response did not match the decision schema.'),
-          instruction: 'Return one corrected decision using the same context.'
-        }
-      } : {})
-    }, maxAgentPromptTokens);
+    const prompt = fitAgentPromptToWindow(context, repair ? {
+      formatRepair: {
+        error: String(formatError || 'The prior response did not match the decision schema.'),
+        instruction: 'Return one corrected decision using the same context.'
+      }
+    } : {});
     const screenshotPath = context?.pinned?.lastToolResult?.result?.screenshotPath ||
       context?.pinned?.lastObservation?.screenshotPath || null;
-    const maxPromptLength = Math.min(100_000, Math.max(4_096, Math.floor(maxAgentPromptTokens * 4 * 0.9)));
+    const maxPromptLength = maxAgentPromptCharacters;
     const result = screenshotPath
       ? await analyzeImageWithLmStudio({
         baseUrl,

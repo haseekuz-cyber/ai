@@ -10,7 +10,46 @@ import {
   normalizeAgentDecision
 } from '../src/agent-model-protocol.mjs';
 import { config } from '../src/config.mjs';
+import { ContextCompiler } from '../src/context-compiler.mjs';
 import { createLmStudioAgentClient } from '../src/lmstudio-client.mjs';
+
+async function captureAgentPrompt(context, options = {}) {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (_url, fetchOptions) => {
+    request = JSON.parse(fetchOptions.body);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { choices: [{ finish_reason: 'stop', message: { content: '{"type":"final","status":"completed","summary":"ok","evidence":[]}' } }] };
+      }
+    };
+  };
+  try {
+    const client = createLmStudioAgentClient({ baseUrl: 'http://127.0.0.1:1234' });
+    await client(context, {
+      model: 'test-model',
+      systemPrompt: UNIFIED_AGENT_SYSTEM_PROMPT,
+      responseSchema: AGENT_DECISION_SCHEMA,
+      ...options
+    });
+    return request.messages[1].content.find((item) => item.type === 'text').text;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function oversizedAgentState() {
+  return {
+    sessionId: 'context-budget',
+    goal: 'Открой блокнот и напиши отчёт',
+    mode: 'autonomous',
+    surface: { id: 'surface-1', mode: 'isolated' },
+    versions: { protocol: 1 },
+    relevantMemory: Array.from({ length: 200 }, (_, index) => ({ text: `приём ${index} ${'детали '.repeat(30)}` }))
+  };
+}
 
 test('decision protocol accepts one tool call or final result but no role switch', () => {
   const decision = normalizeAgentDecision({
@@ -143,12 +182,64 @@ test('LM Studio adapter caps oversized agent prompts to the active context budge
     await client(oversizedContext, {
       model: 'test-model', systemPrompt: UNIFIED_AGENT_SYSTEM_PROMPT, responseSchema: AGENT_DECISION_SCHEMA
     });
-    const promptText = JSON.stringify(request.messages[1].content);
+    const promptText = request.messages[1].content.find((item) => item.type === 'text').text;
     const tokenEstimate = Math.ceil(promptText.length / 4);
-    assert.ok(tokenEstimate <= Math.floor(config.unifiedAgentContextTokens * 0.60));
+    assert.ok(tokenEstimate <= Math.floor(config.unifiedAgentContextTokens * 0.70));
+    JSON.parse(promptText);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('a reduced agent prompt is still valid JSON and says what it dropped', async () => {
+  const oversized = {
+    pinned: { goal: 'Открой блокнот и напиши отчёт' },
+    relevantMemory: Array.from({ length: 400 }, (_, index) => ({ text: `приём ${index} ${'детали '.repeat(40)}` })),
+    recentEvents: Array.from({ length: 200 }, (_, index) => ({
+      sequence: index + 1, type: 'diagnostic.note',
+      payload: { text: `наблюдение ${index} ${'подробность '.repeat(25)}` }
+    }))
+  };
+  const promptText = await captureAgentPrompt(oversized);
+  const prompt = JSON.parse(promptText);
+  assert.equal(typeof prompt.context, 'object');
+  assert.equal(prompt.context.pinned.goal, 'Открой блокнот и напиши отчёт');
+  assert.ok(prompt.context.contextReduction, 'the prompt must declare that the context was reduced');
+  assert.ok(promptText.length <= config.unifiedAgentContextTokens * 4);
+});
+
+test('the format repair instruction survives a context that exceeds the model window', async () => {
+  const compiled = {
+    pinned: { goal: 'Открой блокнот' },
+    relevantMemory: Array.from({ length: 400 }, (_, index) => ({ text: `приём ${index} ${'детали '.repeat(40)}` }))
+  };
+  assert.ok(JSON.stringify(compiled).length > config.unifiedAgentContextTokens * 4);
+  const promptText = await captureAgentPrompt(compiled, {
+    repair: true,
+    formatError: 'decision.tool must be a non-empty string.'
+  });
+  const prompt = JSON.parse(promptText);
+  assert.match(prompt.formatRepair.error, /decision\.tool/);
+  assert.match(prompt.formatRepair.instruction, /corrected decision/i);
+});
+
+test('a context the ContextCompiler already fitted is not reduced a second time', async () => {
+  const events = Array.from({ length: 200 }, (_, index) => ({
+    sequence: index + 1, sessionId: 'context-budget', type: 'diagnostic.note',
+    payload: { text: `наблюдение ${index} ${'подробность '.repeat(25)}` }
+  }));
+  const compiled = new ContextCompiler({ contextWindowTokens: config.unifiedAgentContextTokens })
+    .compile({ state: oversizedAgentState(), events });
+  const prompt = JSON.parse(await captureAgentPrompt(compiled));
+  assert.equal(prompt.context.contextReduction, undefined);
+  assert.equal(prompt.context.relevantMemory.length, compiled.relevantMemory.length);
+  assert.equal(prompt.context.recentEvents.length, compiled.recentEvents.length);
+});
+
+test('a single oversized context field is reduced instead of rejected as too long', async () => {
+  const promptText = await captureAgentPrompt({ pinned: { goal: 'g'.repeat(60_000) } });
+  const prompt = JSON.parse(promptText);
+  assert.match(prompt.context.pinned.goal, /^g+…\[truncated \d+ characters\]$/);
 });
 
 test('LM Studio adapter attaches the fresh observation returned by a UI tool', async (context) => {
