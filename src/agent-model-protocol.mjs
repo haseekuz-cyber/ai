@@ -75,6 +75,37 @@ function rejectUnknownFields(value) {
   }
 }
 
+function normalizeDecisionArguments(value, field = 'decision.arguments') {
+  if (value == null) return {};
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return {};
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {
+      // fall through and preserve the strict validation failure for non-object JSON payloads
+    }
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (Array.isArray(value) && value.length === 0) return {};
+  throw new TypeError(`${field} must be an object.`);
+}
+
+function normalizeDecisionTool(value, field = 'decision.tool') {
+  if (value == null) return 'ui.observe';
+  if (typeof value !== 'string') throw new TypeError(`${field} must be a non-empty string.`);
+  const trimmed = value.trim();
+  return trimmed || 'ui.observe';
+}
+
+function normalizeDecisionReason(value, field = 'decision.reason', fallback = 'Proceed with the safest available action.') {
+  if (value == null) return fallback;
+  if (typeof value !== 'string') throw new TypeError(`${field} must be a non-empty string.`);
+  const trimmed = value.trim();
+  return trimmed || fallback;
+}
+
 export function normalizeAgentDecision(value) {
   requireObject(value, 'decision');
   const type = requireString(value.type, 'decision.type');
@@ -84,12 +115,12 @@ export function normalizeAgentDecision(value) {
   rejectUnknownFields(value);
 
   if (type === 'tool_call') {
-    requireObject(value.arguments, 'decision.arguments');
+    const argumentsValue = normalizeDecisionArguments(value.arguments, 'decision.arguments');
     return cloneAndFreeze({
       type,
-      tool: requireString(value.tool, 'decision.tool'),
-      arguments: value.arguments,
-      reason: requireString(value.reason, 'decision.reason')
+      tool: normalizeDecisionTool(value.tool, 'decision.tool'),
+      arguments: argumentsValue,
+      reason: normalizeDecisionReason(value.reason, 'decision.reason')
     });
   }
   if (type === 'final') {
@@ -102,15 +133,15 @@ export function normalizeAgentDecision(value) {
     return cloneAndFreeze({
       type,
       status: value.status,
-      summary: requireString(value.summary, 'decision.summary'),
+      summary: normalizeDecisionReason(value.summary, 'decision.summary', value.status === 'completed' ? 'Completed successfully.' : 'The task failed.'),
       evidence: value.evidence
     });
   }
   if (type === 'user_question') {
     return cloneAndFreeze({
       type,
-      question: requireString(value.question, 'decision.question'),
-      reason: requireString(value.reason, 'decision.reason')
+      question: normalizeDecisionReason(value.question, 'decision.question', 'Need one missing detail to continue.'),
+      reason: normalizeDecisionReason(value.reason, 'decision.reason')
     });
   }
   throw new TypeError(`unsupported decision type: ${type}`);

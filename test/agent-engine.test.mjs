@@ -36,12 +36,51 @@ test('same session returns a tool result to the same active model context', asyn
   assert.equal((await engine.status(session.sessionId)).sessionId, session.sessionId);
 });
 
+test('null or empty tool arguments are normalized into an empty object instead of crashing the agent', async () => {
+  for (const argumentsValue of [null, [], ' {} ']) {
+    const { engine } = await createAgentFixture({
+      modelClient: async () => ({ type: 'tool_call', tool: 'test.read', arguments: argumentsValue, reason: 'Inspect' })
+    });
+    const session = await engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+    const result = await engine.next(session.sessionId);
+    assert.equal(result.kind, 'tool_result');
+    assert.deepEqual(result.decision.arguments, {});
+    assert.equal(result.results[0].status, 'completed');
+  }
+});
+
+test('empty tool names safely fall back to the read-only observation tool', async () => {
+  const fixture = await createAgentFixture({
+    modelClient: async () => ({ type: 'tool_call', tool: '', arguments: {}, reason: 'Inspect' })
+  });
+  fixture.toolRegistry.register({
+    name: 'ui.observe', risk: 'read_only', readOnly: true, idempotency: 'retryable',
+    inputSchema: { type: 'object', additionalProperties: false }
+  }, async () => ({ ok: true }));
+  const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+  const result = await fixture.engine.next(session.sessionId);
+  assert.equal(result.kind, 'tool_result');
+  assert.equal(result.decision.tool, 'ui.observe');
+  assert.equal(result.decision.reason, 'Inspect');
+  assert.equal(result.results[0].status, 'completed');
+});
+
+test('empty reason text is normalized to a safe default instead of breaking the live mission flow', async () => {
+  const { engine } = await createAgentFixture({
+    modelClient: async () => ({ type: 'tool_call', tool: 'test.read', arguments: {}, reason: '   ' })
+  });
+  const session = await engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+  const result = await engine.next(session.sessionId);
+  assert.equal(result.kind, 'tool_result');
+  assert.equal(result.decision.reason, 'Proceed with the safest available action.');
+});
+
 test('invalid model format is repaired once by the same active model', async () => {
   const calls = [];
   const modelClient = async (_context, options) => {
     calls.push(options);
     return calls.length === 1
-      ? { type: 'tool_call', tool: '' }
+      ? { type: 'tool_call', tool: 'test.read', arguments: 42, reason: 'Inspect' }
       : { type: 'final', status: 'completed', summary: 'Исправлено', evidence: [] };
   };
   const { engine } = await createAgentFixture({ modelClient });
@@ -51,7 +90,7 @@ test('invalid model format is repaired once by the same active model', async () 
   assert.equal(calls.length, 2);
   assert.deepEqual(calls.map((call) => call.model), ['test-model', 'test-model']);
   assert.equal(calls[1].repair, true);
-  assert.match(calls[1].formatError, /decision|tool|arguments/i);
+  assert.match(calls[1].formatError, /decision|arguments/i);
 });
 
 test('transport failure is not misclassified as a format repair', async () => {
