@@ -87,6 +87,30 @@ export function buildErrorPacket(error, context = {}) {
   };
 }
 
+export function agentTurnFailureInput(result) {
+  // Only an operational stall — the engine's no-progress guard ending the session — is a
+  // worker error worth surfacing to the "fix latest error" flow. A model's own `final`
+  // failed conclusion is a reasoned outcome, not a fault, and a poll that merely re-reads
+  // an already-terminal session carries no decisionId; both are deliberately excluded so
+  // the error journal stays honest instead of filling with non-faults.
+  if (result?.kind !== 'terminal' || !result?.decisionId) return null;
+  const state = result.state || null;
+  if (!state || state.status !== 'failed' || !state.terminalReason) return null;
+  const surface = state.surface || null;
+  return {
+    error: { code: 'agent_session_stalled', message: state.terminalReason },
+    context: {
+      phase: 'agent_session',
+      mission: { missionId: state.sessionId, mode: state.mode, status: state.status, instruction: state.goal },
+      window: surface
+        ? { title: surface.name ?? null, nativeWindowHandle: surface.windowHandle ?? null, processId: surface.processId ?? null }
+        : null,
+      actualResult: state.lastToolResult?.error?.message ?? null,
+      versions: state.versions ?? null
+    }
+  };
+}
+
 export async function persistErrorPacket(directory, packet) {
   if (!directory) throw new TypeError('Error packet directory is required.');
   if (!packet?.errorId || !packet?.fingerprint) throw new TypeError('A normalized ErrorPacket is required.');

@@ -167,7 +167,7 @@ import {
   OBSERVATION_COMPILER_SYSTEM_PROMPT,
   selectObservationKeyframes
 } from './experience-compiler.mjs';
-import { buildErrorPacket, listErrorPackets, persistErrorPacket } from './error-packet.mjs';
+import { agentTurnFailureInput, buildErrorPacket, listErrorPackets, persistErrorPacket } from './error-packet.mjs';
 import { routeIntervention } from './intervention-router.mjs';
 import { ModelBroker } from './model-broker.mjs';
 import {
@@ -1601,9 +1601,11 @@ async function startUnifiedAgentSession({ goal, mode = 'guided', windowHandle = 
   return state;
 }
 
-function releaseTerminalUnifiedSession(result) {
+async function releaseTerminalUnifiedSession(result) {
   const state = result?.state || result;
   if (state && ['completed', 'failed', 'cancelled'].includes(state.status)) activeUnifiedSessions.delete(state.sessionId);
+  const failureInput = agentTurnFailureInput(result);
+  if (failureInput) await recordWorkerError(failureInput.error, failureInput.context);
   return result;
 }
 
@@ -2398,7 +2400,7 @@ const server = http.createServer(async (request, response) => {
       if (rejectWhenPaused(response)) return;
       const input = await readJson(request);
       try {
-        return sendJson(response, 200, releaseTerminalUnifiedSession(await unifiedAgentEngine.next(input.sessionId)));
+        return sendJson(response, 200, await releaseTerminalUnifiedSession(await unifiedAgentEngine.next(input.sessionId)));
       } catch (error) {
         const status = ['session_not_found', 'session_cancelled'].includes(error.code) ? 404 : 500;
         return sendJson(response, status, { error: error.code || 'agent_turn_failed', message: error.message });
@@ -2418,7 +2420,7 @@ const server = http.createServer(async (request, response) => {
     if (config.unifiedAgentEnabled && request.method === 'POST' && url.pathname === '/agent/sessions/message') {
       const input = await readJson(request);
       try {
-        return sendJson(response, 200, releaseTerminalUnifiedSession(await unifiedAgentEngine.message(input.sessionId, input.message)));
+        return sendJson(response, 200, await releaseTerminalUnifiedSession(await unifiedAgentEngine.message(input.sessionId, input.message)));
       } catch (error) {
         const status = error.code === 'session_not_found' ? 404 : 400;
         return sendJson(response, status, { error: error.code || 'agent_message_failed', message: error.message });

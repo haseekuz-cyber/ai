@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { buildErrorPacket, listErrorPackets, persistErrorPacket } from '../src/error-packet.mjs';
+import { agentTurnFailureInput, buildErrorPacket, listErrorPackets, persistErrorPacket } from '../src/error-packet.mjs';
 import { normalizeExperienceTransition, promoteExperience } from '../src/experience-schema.mjs';
 import { routeIntervention } from '../src/intervention-router.mjs';
 import { ModelBroker } from '../src/model-broker.mjs';
@@ -22,6 +22,34 @@ test('ErrorPacket classifies failures and redacts typed text and secrets', () =>
   assert.equal(packet.action.text.length, 22);
   assert.equal(packet.evidence.authorization, '[redacted]');
   assert.equal(packet.fingerprint.length, 24);
+});
+
+test('a stalled agent turn becomes a recordable worker error, a model conclusion or a poll does not', () => {
+  const stalled = agentTurnFailureInput({
+    kind: 'terminal',
+    decisionId: 'd1',
+    state: {
+      status: 'failed',
+      sessionId: 's1',
+      mode: 'autonomous',
+      goal: 'Нарисуй красный квадрат',
+      terminalReason: 'AgentSession stopped after 3 consecutive tool failures; the last error was "arguments.action is not allowed.".',
+      surface: { name: 'CorelDRAW 2026', windowHandle: 590866, processId: 23476 },
+      lastToolResult: { status: 'failed', error: { message: 'arguments.action is not allowed.' } }
+    }
+  });
+  assert.ok(stalled);
+  assert.equal(stalled.error.code, 'agent_session_stalled');
+  assert.match(stalled.error.message, /3 consecutive tool failures/);
+  assert.equal(stalled.context.window.nativeWindowHandle, 590866);
+  assert.equal(stalled.context.actualResult, 'arguments.action is not allowed.');
+  const packet = buildErrorPacket(stalled.error, stalled.context);
+  assert.equal(packet.error.message, stalled.error.message);
+  assert.equal(packet.window.nativeWindowHandle, 590866);
+  // a model's own failed conclusion is a reasoned outcome, not a worker fault
+  assert.equal(agentTurnFailureInput({ kind: 'final', decisionId: 'd2', state: { status: 'failed', terminalReason: 'не смог' } }), null);
+  // a poll that re-reads an already-terminal session carries no decisionId and records nothing
+  assert.equal(agentTurnFailureInput({ kind: 'terminal', state: { status: 'failed', terminalReason: 'уже завершено' } }), null);
 });
 
 test('ErrorPacket persists as durable model-independent evidence', async (context) => {

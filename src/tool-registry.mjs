@@ -100,28 +100,66 @@ export class ToolRegistry {
       if (typeof call.toolInvocationId !== 'string' || !call.toolInvocationId) throw new TypeError(`Tool call ${dispatchIndex} needs toolInvocationId.`);
       if (seen.has(call.toolInvocationId)) throw new TypeError(`Duplicate toolInvocationId ${call.toolInvocationId}.`);
       seen.add(call.toolInvocationId);
-      const registered = this.tools.get(call.name);
-      if (!registered) throw new Error(`Unknown tool: ${call.name}.`);
       const args = call.arguments ?? {};
-      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new TypeError(`Arguments for ${call.name} must be an object.`);
-      assertSchemaValue(args, registered.manifest.inputSchema);
-      return { ...call, arguments: args, dispatchIndex, ...registered };
+      const normalized = { ...call, arguments: args, dispatchIndex };
+      // A model can name a tool that does not exist, or pass arguments its schema forbids.
+      // Those are recoverable observations, not engine faults: turn them into a recorded
+      // tool.failed result the agent can see and correct on its next turn, never a throw
+      // that escapes executeBatch, kills the turn and leaves the failure unrecorded.
+      const registered = this.tools.get(call.name);
+      if (!registered) return { ...normalized, rejection: { code: 'unknown_tool', message: `Unknown tool: ${call.name}.` } };
+      if (!args || typeof args !== 'object' || Array.isArray(args)) {
+        return { ...normalized, rejection: { code: 'invalid_arguments', message: `Arguments for ${call.name} must be an object.` } };
+      }
+      try {
+        assertSchemaValue(args, registered.manifest.inputSchema);
+      } catch (error) {
+        return { ...normalized, rejection: { code: 'invalid_arguments', message: error.message } };
+      }
+      return { ...normalized, ...registered };
     });
 
     const results = new Array(normalizedCalls.length);
     for (let index = 0; index < normalizedCalls.length;) {
-      if (normalizedCalls[index].manifest.readOnly) {
+      const current = normalizedCalls[index];
+      if (current.rejection) {
+        results[index] = await this.#rejectCall(sessionId, current);
+        index += 1;
+      } else if (current.manifest.readOnly) {
         let end = index + 1;
-        while (end < normalizedCalls.length && normalizedCalls[end].manifest.readOnly) end += 1;
+        while (end < normalizedCalls.length && !normalizedCalls[end].rejection && normalizedCalls[end].manifest.readOnly) end += 1;
         const groupResults = await this.#executeReadOnlyGroup(sessionId, normalizedCalls.slice(index, end), surface);
         groupResults.forEach((result, offset) => { results[index + offset] = result; });
         index = end;
       } else {
-        results[index] = await this.#executeSequential(sessionId, normalizedCalls[index], surface);
+        results[index] = await this.#executeSequential(sessionId, current, surface);
         index += 1;
       }
     }
     return results;
+  }
+
+  async #rejectCall(sessionId, call) {
+    const existing = await this.ledger.get(sessionId, call.toolInvocationId);
+    if (existing?.status === 'completed' || existing?.status === 'failed' || existing?.status === 'indeterminate') {
+      return cachedToolResult(existing);
+    }
+    const error = call.rejection;
+    await this.ledger.requested(sessionId, {
+      toolInvocationId: call.toolInvocationId,
+      tool: call.name,
+      dispatchIndex: call.dispatchIndex,
+      arguments: call.arguments,
+      causationId: call.causationId
+    });
+    await this.ledger.failed(sessionId, {
+      toolInvocationId: call.toolInvocationId,
+      tool: call.name,
+      dispatchIndex: call.dispatchIndex,
+      error,
+      causationId: call.causationId
+    });
+    return { toolInvocationId: call.toolInvocationId, tool: call.name, status: 'failed', error };
   }
 
   async #prepare(sessionId, call, surface) {

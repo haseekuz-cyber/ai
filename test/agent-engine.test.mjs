@@ -129,6 +129,73 @@ test('repeated tool failures stop the session and keep the real tool error', asy
   assert.match(stalled.state.terminalReason, /no selected UI window/i);
 });
 
+test('invalid tool arguments become a recorded failed observation the model can self-correct', async () => {
+  let attempts = 0;
+  const fixture = await createAgentFixture({
+    modelClient: async () => {
+      attempts += 1;
+      return attempts === 1
+        ? { type: 'tool_call', tool: 'test.read', arguments: { action: 'draw' }, reason: 'Осмотреть окно' }
+        : { type: 'final', status: 'completed', summary: 'Исправил аргументы', evidence: ['ok'] };
+    }
+  });
+  const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+  const failed = await fixture.engine.next(session.sessionId);
+  assert.equal(failed.kind, 'tool_result');
+  assert.equal(failed.results[0].status, 'failed');
+  assert.equal(failed.results[0].error.code, 'invalid_arguments');
+  assert.match(failed.results[0].error.message, /action .*not allowed/i);
+  const loaded = await fixture.sessionStore.load(session.sessionId);
+  assert.equal(loaded.events.filter((event) => event.type === 'tool.failed').length, 1);
+  assert.equal(loaded.state.lastToolResult.status, 'failed');
+  assert.match(loaded.state.lastToolResult.error.message, /action .*not allowed/i);
+  const recovered = await fixture.engine.next(session.sessionId);
+  assert.equal(recovered.kind, 'final');
+  assert.equal(recovered.state.status, 'completed');
+});
+
+test('an unknown tool name fails as an observation instead of crashing the turn', async () => {
+  let attempts = 0;
+  const fixture = await createAgentFixture({
+    modelClient: async () => {
+      attempts += 1;
+      return attempts === 1
+        ? { type: 'tool_call', tool: 'ui.magic', arguments: {}, reason: 'Попробовать несуществующий инструмент' }
+        : { type: 'final', status: 'completed', summary: 'Выбрал существующий инструмент', evidence: ['ok'] };
+    }
+  });
+  const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+  const failed = await fixture.engine.next(session.sessionId);
+  assert.equal(failed.kind, 'tool_result');
+  assert.equal(failed.results[0].status, 'failed');
+  assert.equal(failed.results[0].error.code, 'unknown_tool');
+  assert.match(failed.results[0].error.message, /ui\.magic/);
+  const loaded = await fixture.sessionStore.load(session.sessionId);
+  assert.equal(loaded.events.filter((event) => event.type === 'tool.failed').length, 1);
+  const recovered = await fixture.engine.next(session.sessionId);
+  assert.equal(recovered.kind, 'final');
+});
+
+test('repeated invalid tool arguments stop the session with the real validation error', async () => {
+  let attempts = 0;
+  const fixture = await createAgentFixture({
+    modelClient: async () => {
+      attempts += 1;
+      return { type: 'tool_call', tool: 'test.read', arguments: { action: 'draw' }, reason: `Попытка ${attempts}` };
+    }
+  });
+  const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+  for (let turn = 0; turn < 3; turn += 1) {
+    const result = await fixture.engine.next(session.sessionId);
+    assert.equal(result.results[0].status, 'failed');
+  }
+  const stalled = await fixture.engine.next(session.sessionId);
+  assert.equal(stalled.kind, 'terminal');
+  assert.equal(stalled.state.status, 'failed');
+  assert.match(stalled.state.terminalReason, /3 consecutive tool failures/i);
+  assert.match(stalled.state.terminalReason, /not allowed/i);
+});
+
 test('invalid model format is repaired once by the same active model', async () => {
   const calls = [];
   const modelClient = async (_context, options) => {
