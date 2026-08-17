@@ -10,6 +10,45 @@ export function normalizeSkillId(value) {
   return value.toLowerCase();
 }
 
+export function createSkillRunState({
+  runId,
+  skill,
+  skillPath,
+  steps,
+  skillGraph = null,
+  window,
+  windowHandle,
+  startStepIndex = 0,
+  now = Date.now(),
+  ttlMs = 10 * 60 * 1_000
+}) {
+  if (!window || !Number.isInteger(Number(window.nativeWindowHandle)) || Number(window.nativeWindowHandle) <= 0) {
+    throw new TypeError('A concrete window identity is required for a learned skill run.');
+  }
+  const windowIdentity = {
+    ...window,
+    bounds: window.bounds ? { ...window.bounds } : window.bounds
+  };
+  return {
+    runId,
+    skill,
+    skillPath,
+    steps,
+    skillGraph,
+    currentNodeId: skillGraph?.nodes?.some((node) => node.nodeId === `precondition:${startStepIndex}`)
+      ? `precondition:${startStepIndex}`
+      : null,
+    windowHandle,
+    windowIdentity,
+    processId: window.processId,
+    stepIndex: startStepIndex,
+    status: 'ready',
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + ttlMs).toISOString(),
+    expiresAtMs: now + ttlMs
+  };
+}
+
 export function validateSkillForWindow(skill, window) {
   if (!skill || skill.schemaVersion !== 1 || !Array.isArray(skill.steps) || skill.steps.length === 0) {
     throw new TypeError('Skill format is invalid.');
