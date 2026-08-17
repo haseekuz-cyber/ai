@@ -120,28 +120,38 @@ export function selectObservationKeyframes(skill, {
 } = {}) {
   const steps = Array.isArray(skill?.steps) ? skill.steps : [];
   const submitted = extractSubmittedIntents(steps);
-  const candidates = [submitted[0]?.beforeImagePath || beforePath];
+  const initial = submitted[0]?.beforeImagePath || beforePath;
+  const intermediate = [];
   if (steps.length > 2) {
     if (submitted.length > 1) {
       const middle = submitted[Math.floor((submitted.length - 1) / 2)];
-      candidates.push(middle?.afterImagePath || '');
-      candidates.push(submitted.at(-1)?.afterImagePath || '');
+      intermediate.push(middle?.afterImagePath || '');
+      intermediate.push(submitted.at(-1)?.afterImagePath || '');
     } else {
       for (const ratio of [1 / 3, 2 / 3]) {
         const step = steps[Math.min(steps.length - 1, Math.floor(steps.length * ratio))];
-        candidates.push(step?.visualEvidence?.afterImagePath || '');
+        intermediate.push(step?.visualEvidence?.afterImagePath || '');
       }
     }
   }
-  candidates.push(resultFrameAfterFinalIntent === true
+  const final = resultFrameAfterFinalIntent === true
     ? (afterPath || skill?.visualReference?.imagePath || '')
-    : (submitted.at(-1)?.afterImagePath || afterPath || ''));
-  return [...new Set(candidates.filter(Boolean))].slice(0, Math.max(2, Math.min(Number(maxImages) || 4, 4)));
+    : (submitted.at(-1)?.afterImagePath || afterPath || '');
+  const limit = Math.max(2, Math.min(Number(maxImages) || 4, 4));
+  const middleCandidates = [...new Set(intermediate.filter((item) => item && item !== initial && item !== final))];
+  const middleSlots = Math.max(0, limit - 2);
+  const selectedMiddle = middleSlots >= middleCandidates.length
+    ? middleCandidates
+    : Array.from({ length: middleSlots }, (_, index) => {
+        const position = ((index + 1) * (middleCandidates.length + 1)) / (middleSlots + 1) - 1;
+        return middleCandidates[Math.max(0, Math.min(middleCandidates.length - 1, Math.round(position)))];
+      });
+  return [...new Set([initial, ...selectedMiddle, final].filter(Boolean))];
 }
 
 export const OBSERVATION_COMPILER_SYSTEM_PROMPT = `You compile a passive Windows UI observation into causal semantic experience.
 The images are chronological: BEFORE, optional MIDDLE frames, and AFTER. The action summary is also chronological.
-Infer what the user was trying to achieve, why the meaningful actions were necessary, and what visibly changed. A long session can contain several goals: split it into episodes instead of forcing one explanation. Treat submitted typed prompts as strong evidence of intent, not proof of success. The latest submitted prompt is the intended final goal unless later evidence clearly replaces it. Search, browsing, and attaching a reference may support a later creation request rather than being the final goal. Treat the AFTER image as evidence of result. Separate causal actions from navigation, correction, waiting, and accidental noise.
+Infer what the user was trying to achieve, why the meaningful actions were necessary, and what visibly changed. A long session can contain several goals: split it into episodes instead of forcing one explanation. Text in demonstrationGuidance is an explicit explanation from the human teacher: use it to understand the shown actions, never turn typing that explanation into an action to replay. Treat submitted typed prompts as strong evidence of intent, not proof of success. The latest submitted prompt is the intended final goal unless later evidence clearly replaces it. Search, browsing, and attaching a reference may support a later creation request rather than being the final goal. Treat the AFTER image as evidence of result. Separate causal actions from navigation, correction, waiting, controller interaction, and accidental noise.
 Return concise Russian JSON matching the required schema. Never claim success unless the visible comparison supports it. If intent or outcome is unclear, say so and lower confidence. Extract reusable techniques and preferences, never saved coordinates or a blind full-session replay.`;
 
 export function buildObservationCompilerPrompt({ skill, beforeSha256 = '', afterSha256 = '', resultFrameAfterFinalIntent = true }) {
@@ -153,6 +163,10 @@ export function buildObservationCompilerPrompt({ skill, beforeSha256 = '', after
     windowTitle: clean(skill?.application?.titleAtRecording, 180),
     durationMs,
     rawStepCount: Array.isArray(skill?.steps) ? skill.steps.length : 0,
+    demonstrationGuidance: (Array.isArray(skill?.demonstration?.guidance) ? skill.demonstration.guidance : [])
+      .slice(-4).map((item) => clean(item?.text, 700)),
+    observedApplications: (Array.isArray(skill?.demonstration?.observedApplications) ? skill.demonstration.observedApplications : [])
+      .slice(0, 8).map((item) => ({ processName: clean(item?.processName, 120), windowName: clean(item?.windowName, 180) })),
     submittedIntents: extractSubmittedIntents(skill?.steps).slice(-4)
       .map(({ stepIndex, atMs, text, target }) => ({ stepIndex, atMs, text: clean(text, 300), target })),
     actionGroups: summary,

@@ -17,7 +17,8 @@ export function findLatestSemanticObservation(skills = [], processName = '') {
 
 export function canRepeatSemanticObservation(skill) {
   const semantic = skill?.semanticExperience;
-  return semantic?.understood === true && Boolean(clean(semantic.sessionGoal)) && Number(semantic.confidence) >= 0.2;
+  return semantic?.understood === true && Boolean(clean(semantic.sessionGoal)) &&
+    skill?.causalReplay?.ready === true && skill?.executionPolicy?.replayable === true;
 }
 
 export function summarizeSemanticObservation(skill) {

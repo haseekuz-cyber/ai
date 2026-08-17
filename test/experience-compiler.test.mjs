@@ -45,7 +45,25 @@ test('semantic compilation compares chronological keyframes and keeps the prompt
   assert.deepEqual(selectObservationKeyframes(skill, { beforePath: 'before.png', afterPath: 'after.png' }), [
     'before.png', 'frame-100.png', 'frame-200.png', 'after.png'
   ]);
+  assert.deepEqual(selectObservationKeyframes(skill, { beforePath: 'before.png', afterPath: 'after.png', maxImages: 3 }), [
+    'before.png', 'frame-200.png', 'after.png'
+  ]);
   assert.ok(buildObservationCompilerPrompt({ skill }).length <= 4_000);
+});
+
+test('explicit guidance typed during desktop observation enters the compiler prompt as intent, not replay', () => {
+  const skill = {
+    application: { processName: 'CorelDRW', titleAtRecording: 'Document' },
+    demonstration: {
+      guidance: [{ text: 'Сначала создайте документ, затем нажмите Enter.' }],
+      observedApplications: [{ processName: 'CorelDRW', windowName: 'Document' }]
+    },
+    steps: [{ index: 0, type: 'click', atMs: 100, target: { name: 'Создать документ' } }]
+  };
+  const prompt = buildObservationCompilerPrompt({ skill });
+  assert.match(prompt, /demonstrationGuidance/);
+  assert.match(prompt, /Сначала создайте документ/);
+  assert.match(prompt, /observedApplications/);
 });
 
 test('normalization records causal outcome but exact-identical frames cannot be marked changed', () => {

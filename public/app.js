@@ -190,6 +190,15 @@ async function recoverAnarchy(message, detail = '', errorInfo = {}) {
     await cancelMission();
     anarchyResumeGoal = null;
   }
+  if (decision.action === 'infrastructure_error') {
+    clearAnarchyTimer();
+    await cancelMission();
+    anarchyMode = false;
+    anarchyAwaitingCorrection = false;
+    setStatus(`${message}. ${decision.report}`, { error: true });
+    updateControls();
+    return;
+  }
   if (decision.action === 'needs_user') {
     clearAnarchyTimer();
     anarchyAwaitingCorrection = true;
@@ -1044,10 +1053,24 @@ async function rateStep(rating) {
     feedbackCard.hidden = true;
     if (ratedStep.source === 'skill') {
       if (rating === 'negative') {
+        correctionResume = {
+          kind: 'skill',
+          skillId: currentSkillRun?.skill?.skillId || ratedStep.skillId || null,
+          failedStepIndex: Number(ratedStep.executedStepIndex),
+          nextStepIndex: Number(ratedStep.executedStepIndex) + 1,
+          stepCount: currentSkillRun?.skill?.stepCount || 0,
+          instruction: currentSkillRun?.skill?.instruction || taskInput.value.trim(),
+          windowHandle: selectedWindowHandle,
+          anarchyMode: false,
+          autonomousGoal: null,
+          missionId: null
+        };
         showCorrection({ source: 'skill', ratedStep }, 'Шаг по показу оказался неверным. Можно показать правильный вариант только этого шага; описание не обязательно.');
         setStatus('Ошибка сохранена. Исправьте этот шаг текстом, мини‑демонстрацией или попросите другой способ.');
-      } else if (ratedStep.nextStep && ratedStep.status === 'ready') {
-        showLearnedStep(ratedStep.nextStep);
+      } else if (body.skillRun?.currentStep && body.skillRun.status === 'ready') {
+        currentSkillRun.status = body.skillRun.status;
+        currentSkillRun.stepIndex = body.skillRun.stepIndex;
+        showLearnedStep(body.skillRun.currentStep);
       } else {
         currentSkillRun = null;
         demoRunButton.hidden = false;
@@ -1070,8 +1093,14 @@ async function rateStep(rating) {
         showCorrection({ source: 'mission', missionId: currentMission?.missionId || null, ratedStep }, 'Ошибка уже сохранена. Описание необязательно — можно сразу показать правильный шаг или попросить другой способ.');
         setStatus('Ошибка сохранена. Выберите способ коррекции этого шага.');
       } else {
-        continueMission = Boolean(currentMission && currentMission.status !== 'limit_reached');
-        setStatus('Правильный результат сохранён. Готовлю следующий шаг…');
+        if (correctionResume?.kind === 'skill') {
+          correctionResume.planId = ratedStep.planId;
+          resumeCorrectedTask = true;
+          setStatus('Исправление подтверждено. Возвращаюсь к следующему шагу того же причинного навыка…');
+        } else {
+          continueMission = Boolean(currentMission && currentMission.status !== 'limit_reached');
+          setStatus('Правильный результат сохранён. Готовлю следующий шаг…');
+        }
       }
     }
   } catch (error) {
@@ -1085,7 +1114,48 @@ async function rateStep(rating) {
     updateControls();
   }
   if (continueMission) await planNextStep();
-  else if (resumeCorrectedTask) await planNextStep();
+  else if (resumeCorrectedTask) await resumeCausalSkillAfterCorrection();
+}
+
+async function resumeCausalSkillAfterCorrection() {
+  const resume = correctionResume;
+  if (resume?.kind !== 'skill') return;
+  await cancelMission();
+  if (resume.planId && resume.correctionApplied !== true) {
+    const applied = await api('/api/skills/apply-plan-correction', {
+      method: 'POST',
+      body: JSON.stringify({
+        originalSkillId: resume.skillId,
+        failedStepIndex: resume.failedStepIndex,
+        planId: resume.planId
+      })
+    });
+    resume.nextStepIndex = applied.resumeStepIndex;
+    resume.stepCount = applied.stepCount;
+    resume.correctionApplied = true;
+  }
+  if (!resume.skillId || resume.nextStepIndex >= resume.stepCount) {
+    currentSkillRun = null;
+    correctionResume = null;
+    setStatus('Исправленный финальный шаг принят. Причинный навык завершён.');
+    return;
+  }
+  const request = prepareSavedSkillRequest({
+    skillId: resume.skillId,
+    windowHandle: resume.windowHandle || selectedWindowHandle,
+    startStepIndex: resume.nextStepIndex
+  });
+  const body = await api(request.path, request.options);
+  selectedWindowHandle = resume.windowHandle || selectedWindowHandle;
+  currentSkillRun = {
+    ...body,
+    stepIndex: body.startStepIndex,
+    currentStep: body.currentStep,
+    source: 'causal-correction-resume'
+  };
+  correctionResume = null;
+  showLearnedStep(body.currentStep);
+  setStatus('Исправление принято. Продолжаю тот же навык со следующего невыполненного причинного шага.');
 }
 
 function teachCurrentStep() {
@@ -1137,7 +1207,10 @@ async function submitCorrection({ tryAnother = false } = {}) {
         autonomousGoal: null
       };
       await cancelSkillRun();
-      taskInput.value = resume.instruction;
+      const correctionTask = resume.kind === 'skill'
+        ? `Исправь только один ошибочный шаг причинного навыка «${resume.instruction}»: ${correction}. После видимого результата остановись; следующие шаги навыка не выполняй.`
+        : resume.instruction;
+      taskInput.value = correctionTask;
       selectedWindowHandle = resume.windowHandle || selectedWindowHandle;
       anarchyMode = resume.anarchyMode === true;
       anarchyAwaitingCorrection = false;
@@ -1158,7 +1231,7 @@ async function submitCorrection({ tryAnother = false } = {}) {
         body: JSON.stringify({ missionId: currentMission.missionId, correction })
       });
       currentMission = corrected.mission || currentMission;
-      correctionResume = null;
+      if (resume.kind !== 'skill') correctionResume = null;
     }
     hideCorrection();
     anarchyAwaitingCorrection = false;
@@ -1177,7 +1250,19 @@ async function demonstrateCorrectionStep() {
   if (!pendingCorrection || busy) return;
   const resumeInstruction = taskInput.value.trim() ||
     (anarchyMode ? '' : currentMission?.instruction || currentSkillRun?.skill?.instruction || '');
+  const existingSkillResume = correctionResume?.kind === 'skill'
+    ? correctionResume
+    : pendingCorrection.source === 'skill' && currentSkillRun
+      ? {
+          kind: 'skill',
+          skillId: currentSkillRun.skill?.skillId || null,
+          failedStepIndex: Number(currentSkillRun.stepIndex || 0),
+          nextStepIndex: Number(currentSkillRun.stepIndex || 0) + 1,
+          stepCount: currentSkillRun.skill?.stepCount || 0
+        }
+      : {};
   correctionResume = {
+    ...existingSkillResume,
     instruction: resumeInstruction,
     windowHandle: selectedWindowHandle,
     anarchyMode,
@@ -1287,6 +1372,22 @@ function stopTeachingPoll() {
 async function resumeAfterStepDemonstration(skillId) {
   if (!correctionResume) return;
   const resume = correctionResume;
+  if (resume.kind === 'skill') {
+    const applied = await api('/api/skills/apply-demonstrated-correction', {
+      method: 'POST',
+      body: JSON.stringify({
+        originalSkillId: resume.skillId,
+        failedStepIndex: resume.failedStepIndex,
+        correctionSkillId: skillId
+      })
+    });
+    resume.nextStepIndex = applied.resumeStepIndex;
+    resume.stepCount = applied.stepCount;
+    resume.correctionApplied = true;
+    reportJarvis('Обучение', `Мини‑демонстрация ${skillId} заменила ошибочный шаг; продолжаю исходный причинный навык.`);
+    await resumeCausalSkillAfterCorrection();
+    return;
+  }
   taskInput.value = resume.instruction;
   selectedWindowHandle = resume.windowHandle || selectedWindowHandle;
   anarchyMode = resume.anarchyMode === true;
@@ -1362,16 +1463,16 @@ async function toggleTeaching() {
         : stepTeachingContext?.instruction || taskInput.value.trim() || 'Показать правильный способ для текущего затруднения';
       if (passiveLearning) {
         demoButton.textContent = 'Через 3 секунды…';
-        demoTitle.textContent = 'Выберите окно для наблюдения';
-        demoStatus.textContent = 'Перейдите в любую программу на любом мониторе. Агент только наблюдает.';
-        setStatus('Через 3 секунды начнётся пассивное обучение. Выберите нужное окно…');
+        demoTitle.textContent = 'Подготовьте правый монитор';
+        demoStatus.textContent = 'Откройте на правом мониторе любые программы и диалоги. Выбирать отдельное окно не нужно: агент увидит монитор целиком и только наблюдает.';
+        setStatus('Через 3 секунды начнётся наблюдение всего правого монитора…');
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
       const body = await api('/api/teach/start', {
         method: 'POST',
         body: JSON.stringify({
           ...(passiveLearning
-            ? { captureForeground: true, learningMode: 'passive' }
+            ? { captureDisplay: true, learningMode: 'passive' }
             : { windowHandle: selectedWindowHandle }),
           instruction,
           name: instruction.slice(0, 96),
@@ -1382,12 +1483,14 @@ async function toggleTeaching() {
       demoButton.textContent = passiveLearning ? 'Завершить наблюдение' : 'Завершить показ';
       demoButton.classList.add('recording');
       demoTitle.textContent = passiveLearning ? 'Ассистент наблюдает и учится' : 'Демонстрация записывается';
-      demoStatus.textContent = `Записываются мышь, клавиатура, траектории и изменения только в окне: ${body.window?.name || body.window?.processName || 'выбранная программа'}. Завершите прямо там: Ctrl+Alt+F10.`;
+      demoStatus.textContent = passiveLearning
+        ? 'Записываются все окна, диалоги, мышь, клавиатура и траектории на правом мониторе. Завершите из любой программы: Ctrl+Alt+F10.'
+        : `Записываются мышь, клавиатура и траектории в окне: ${body.window?.name || body.window?.processName || 'выбранная программа'}.`;
       demoLive.hidden = false;
       renderTeachingPreview();
       startTeachingPoll();
       setStatus(passiveLearning
-        ? 'Работайте как обычно. В конце не возвращайтесь сюда: нажмите Ctrl+Alt+F10, чтобы сохранить настоящий итоговый экран.'
+        ? 'Работайте как обычно на правом мониторе. Важные действия и изменения интерфейса попадут в кадры. После результата подождите секунду и нажмите Ctrl+Alt+F10.'
         : 'Покажите правильное выполнение в выбранной программе.');
     } else {
       const wasStepCorrection = Boolean(stepTeachingContext);
@@ -1421,7 +1524,7 @@ async function toggleTeaching() {
         observationUnderstanding.hidden = true;
         demoTitle.textContent = semantic?.understood ? 'Опыт понят и сохранён' : 'Наблюдение сохранено для уточнения';
         demoStatus.textContent = semantic?.understood
-          ? `Цель: ${semantic.sessionGoal || 'определена'}. Результат: ${semantic.comparison?.outcome || 'сравнён по кадрам до и после'}. Причинных эпизодов: ${semantic.episodes?.length || 0}; шумные движения не будут воспроизводиться.`
+          ? `Цель: ${semantic.sessionGoal || 'определена'}. Результат: ${semantic.comparison?.outcome || 'сравнён по кадрам до и после'}. Подсказок учителя: ${body.skill?.demonstration?.guidance?.length || 0}; причинных эпизодов: ${semantic.episodes?.length || 0}.`
           : `Сырые действия и кадры сохранены, но смысл пока не подтверждён. ${body.semanticCompilationError || semantic?.comparison?.outcome || 'Нужно более короткое наблюдение или уточнение.'}`;
         setStatus(semantic?.understood
           ? 'JARVIS сравнил начало и итог, выделил цель, причинные действия и переносимые приёмы.'
@@ -1493,19 +1596,26 @@ async function repeatLatestObservation() {
     hideCorrection();
     resetFeedbackView();
     taskInput.value = goal.goal;
-    anarchyMode = true;
-    semanticReplayMode = true;
-    anarchyAwaitingCorrection = false;
-    anarchyRunId += 1;
-    anarchyStepCount = 0;
-    anarchyResumeGoal = goal;
-    setStatus(`Повторяю понятое: ${goal.goal}. Координаты записи не воспроизводятся — каждый шаг заново ищется и проверяется.`);
+    const request = prepareSavedSkillRequest({
+      windowHandle: selectedWindowHandle,
+      skillId: latestObservedSkill.skillId
+    });
+    const body = await api(request.path, request.options);
+    currentSkillRun = {
+      ...body,
+      stepIndex: body.startStepIndex || 0,
+      currentStep: body.currentStep,
+      source: 'causal-observation'
+    };
+    showLearnedStep(body.currentStep);
+    setStatus(`Причинный повтор готов: ${goal.goal}. Используются все ${body.skill?.stepCount || 0} сохранённых действий, свежая геометрия окна и референсы каждого шага.`);
     reportJarvis('Повтор', `Цель: ${goal.goal}. Критерий: ${goal.successCriteria}`);
+  } catch (error) {
+    setStatus(`Не удалось подготовить причинный повтор: ${error.message}`, { error: true });
   } finally {
     busy = false;
     updateControls();
   }
-  await planNextStep(false, anarchyRunId);
 }
 
 async function runDemonstratedSkill() {

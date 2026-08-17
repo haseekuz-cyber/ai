@@ -65,12 +65,49 @@ function normalizedCenter(element, bounds) {
   };
 }
 
+function normalizedPointOnScreen(point, bounds) {
+  return {
+    x: Number(bounds.x) + Number(point.x) * Math.max(0, Number(bounds.width) - 1),
+    y: Number(bounds.y) + Number(point.y) * Math.max(0, Number(bounds.height) - 1)
+  };
+}
+
+function pointInsideElement(point, element, bounds) {
+  const screen = normalizedPointOnScreen(point, bounds);
+  const area = element?.bounds;
+  return area && screen.x >= Number(area.x) && screen.x < Number(area.x) + Number(area.width) &&
+    screen.y >= Number(area.y) && screen.y < Number(area.y) + Number(area.height);
+}
+
+function genericSurfaceTarget(step, element, bounds) {
+  if (!step?.point && !step?.from) return false;
+  const type = String(element?.controlType || step?.target?.controlType || '').toLowerCase();
+  const surface = ['pane', 'canvas', 'document', 'window'].includes(type);
+  const area = Number(element?.bounds?.width) * Number(element?.bounds?.height);
+  const windowArea = Math.max(1, Number(bounds?.width) * Number(bounds?.height));
+  const weakIdentity = !step?.target?.name && !step?.target?.className &&
+    (!step?.target?.automationId || /^\d{1,3}$/.test(String(step.target.automationId)));
+  return surface && (weakIdentity || area / windowArea >= 0.15);
+}
+
 export function groundLearnedStepToElements(step, elements = [], bounds) {
   if (!step?.target || !bounds) return { step, matched: false, reason: 'no_selector' };
   const matches = elements.filter((element) => usableElement(element, bounds) && selectorMatches(element, step.target));
   const ordinal = Number.isInteger(step.target.ordinal) ? step.target.ordinal : null;
   const element = ordinal === null ? (matches.length === 1 ? matches[0] : null) : matches[ordinal];
   if (!element) return { step, matched: false, reason: matches.length > 1 ? 'ambiguous_selector' : 'selector_not_found' };
+
+  // Canvas-like applications often expose their entire document as one Pane.
+  // Snapping every demonstrated point to that Pane's center destroys drawing,
+  // selection and formatting gestures. Keep the normalized demonstrated point
+  // and adapt it only to the fresh window geometry.
+  if (genericSurfaceTarget(step, element, bounds)) {
+    const anchor = step.type === 'drag' ? step.from : step.point;
+    if (!pointInsideElement(anchor, element, bounds)) {
+      return { step, matched: false, blocked: true, reason: 'generic_surface_point_outside_current_surface', element };
+    }
+    return { step, matched: false, reason: 'generic_surface_use_relative_point', element };
+  }
 
   const point = normalizedCenter(element, bounds);
   const grounded = { ...step };

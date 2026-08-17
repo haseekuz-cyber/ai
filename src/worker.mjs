@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -9,7 +9,7 @@ import { readJson, sendJson } from './http-utils.mjs';
 import { isAuthorized, normalizeTask } from './protocol.mjs';
 import { collectWindowsDiagnostics } from './windows-diagnostics.mjs';
 import { evaluateCompatibility } from './compatibility.mjs';
-import { resolveCaptureTarget } from './screen-boundary.mjs';
+import { intersectBounds, resolveCaptureTarget } from './screen-boundary.mjs';
 import { captureDisplay } from './screen-capture.mjs';
 import { captureWindow } from './window-capture.mjs';
 import { createBoundedUiRequest, resolveUiAutomationDisplay, runUiAutomation } from './uia-bridge.mjs';
@@ -57,6 +57,9 @@ import {
   publicLearnedStep,
   validateSkillForWindow
 } from './skill-runner.mjs';
+import { compileCausalReplaySkill, executableSkillSteps } from './causal-skill.mjs';
+import { partitionObservationEvents, selectFinalMeaningfulFrame } from './observation-guidance.mjs';
+import { isHumanApprovedCorrectionPlan, plannerProposalAsCorrectionSteps, replaceSkillStep } from './skill-correction.mjs';
 import { appendAuditEvent, readAuditEvents } from './audit-log.mjs';
 import { startSafetyHotkey } from './safety-hotkey.mjs';
 import {
@@ -80,7 +83,8 @@ import {
   applyReferenceComparison,
   normalizeReferenceComparison,
   referenceNeedsReview,
-  REFERENCE_COMPARATOR_SYSTEM_PROMPT
+  REFERENCE_COMPARATOR_SYSTEM_PROMPT,
+  STEP_REFERENCE_COMPARATOR_SYSTEM_PROMPT
 } from './reference-validation.mjs';
 import { cropImageRegion } from './image-region.mjs';
 import {
@@ -270,13 +274,23 @@ async function ensureWindowEventObserver(windowHandle, mode = 'background') {
       clearTimeout(observerBackgroundTimer);
       observerBackgroundTimer = null;
     }
-    const snapshot = await windowObserver.ensure(windowHandle, { mode });
+    const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+    const snapshot = await windowObserver.ensure(windowHandle, { mode, captureBounds: display.bounds });
     windowObserverError = null;
     return snapshot;
   } catch (error) {
     windowObserverError = error.message;
     return null;
   }
+}
+
+async function captureAssignedDisplayFrame(outputPath) {
+  const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+  return captureDisplay({
+    scriptPath: config.captureScript,
+    deviceName: display.deviceName,
+    outputPath
+  });
 }
 
 function scheduleWindowObserverBackground(windowHandle) {
@@ -295,11 +309,9 @@ async function captureWindowAfterSettling({ windowHandle, beforeObservation, lab
       windowObserver.status === 'observing' && Number.isInteger(observerSequence)) {
     try {
       const eventSettling = await windowObserver.waitForSettledChange({ afterSequence: observerSequence });
-      const observation = await captureWindow({
-        scriptPath: config.windowCaptureScript,
-        windowHandle,
-        outputPath: path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-${label}-keyframe.png`)
-      });
+      const observation = await captureAssignedDisplayFrame(
+        path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-${label}-keyframe.png`)
+      );
       const changed = observation.sha256 !== beforeObservation.sha256;
       const reason = changed
         ? (eventSettling.stable ? 'changed_and_stable' : 'timeout_after_change')
@@ -324,14 +336,12 @@ async function captureWindowAfterSettling({ windowHandle, beforeObservation, lab
   }
   const fallback = await waitForSettledObservation({
     beforeObservation,
-    capture: async (attempt) => captureWindow({
-      scriptPath: config.windowCaptureScript,
-      windowHandle,
-      outputPath: path.join(
+    capture: async (attempt) => captureAssignedDisplayFrame(
+      path.join(
         config.observationsDirectory,
         `${Date.now()}-${randomUUID()}-${label}-${attempt}.png`
       )
-    })
+    )
   });
   fallback.settling.source = 'png_polling_fallback';
   fallback.settling.keyframesWritten = fallback.settling.captureCount;
@@ -366,6 +376,37 @@ async function compareSkillVisualReference(skill, currentObservation) {
     };
   } catch (error) {
     return referenceNeedsReview(error);
+  }
+}
+
+function pathInsideRoot(candidate, root) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function compareSkillStepReference(skill, step, currentObservation) {
+  const declaredPath = step?.verification?.demonstratedAfterImagePath || step?.visualEvidence?.afterImagePath;
+  if (typeof declaredPath !== 'string' || !declaredPath.trim()) return null;
+  const referencePath = path.resolve(declaredPath);
+  if (!pathInsideRoot(referencePath, config.teachingDirectory) && !pathInsideRoot(referencePath, config.skillsDirectory)) {
+    return referenceNeedsReview('The demonstrated step reference is outside the allowed learning directories.', 'step_reference_invalid_path');
+  }
+  try {
+    await fs.access(referencePath);
+    const comparisonVision = await analyzeImagesWithLmStudio({
+      baseUrl: config.lmStudioBaseUrl,
+      model: config.lmStudioModel,
+      imagePaths: [referencePath, currentObservation.outputPath],
+      systemPrompt: STEP_REFERENCE_COMPARATOR_SYSTEM_PROMPT,
+      prompt: `Навык: ${skill.instruction}\nШаг: ${JSON.stringify(publicLearnedStep(step))}\nОжидаемый результат: ${step.expectedResult || 'тот же локальный видимый результат, что в демонстрации'}.`,
+      maxOutputTokens: 700
+    });
+    return {
+      ...normalizeReferenceComparison(comparisonVision.analysis),
+      stats: comparisonVision.stats
+    };
+  } catch (error) {
+    return referenceNeedsReview(error, 'step_reference_compare_unavailable');
   }
 }
 
@@ -886,7 +927,8 @@ function rejectWhenPaused(response) {
 async function loadSkill(skillId) {
   const normalizedId = normalizeSkillId(skillId);
   const skillPath = path.join(config.skillsDirectory, `${normalizedId}.json`);
-  return { skill: JSON.parse(await fs.readFile(skillPath, 'utf8')), skillPath };
+  const stored = JSON.parse(await fs.readFile(skillPath, 'utf8'));
+  return { skill: compileCausalReplaySkill(stored), skillPath };
 }
 
 async function loadAllSkills() {
@@ -896,12 +938,30 @@ async function loadAllSkills() {
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
     try {
-      const skill = JSON.parse(await fs.readFile(path.join(config.skillsDirectory, entry.name), 'utf8'));
+      const skill = compileCausalReplaySkill(JSON.parse(await fs.readFile(path.join(config.skillsDirectory, entry.name), 'utf8')));
       if (skill?.schemaVersion === 1 && typeof skill.skillId === 'string' && Array.isArray(skill.steps)) skills.push(skill);
     } catch { }
   }
   skills.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
   return skills;
+}
+
+async function persistSkillRevision({ skillPath, previousSkill, nextSkill }) {
+  const versionsDirectory = path.join(config.skillsDirectory, '.versions', previousSkill.skillId);
+  await fs.mkdir(versionsDirectory, { recursive: true });
+  const backupPath = path.join(versionsDirectory, `${Date.now()}-revision-${Number(previousSkill.revision) || 1}.json`);
+  try {
+    // Preserve the exact bytes that were on disk so rollback never depends on
+    // virtual compilation performed by loadSkill().
+    await fs.copyFile(skillPath, backupPath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    await fs.writeFile(backupPath, JSON.stringify(previousSkill, null, 2), 'utf8');
+  }
+  const temporaryPath = `${skillPath}.${randomUUID()}.tmp`;
+  await fs.writeFile(temporaryPath, JSON.stringify(nextSkill, null, 2), 'utf8');
+  await fs.rename(temporaryPath, skillPath);
+  return backupPath;
 }
 
 async function terminateChildRuntime(runtime, timeoutMs = 2_000) {
@@ -973,7 +1033,7 @@ async function compilePassiveObservation({ skill, beforeObservation, afterObserv
   const proposedPaths = selectObservationKeyframes(skill, {
     beforePath: beforeObservation?.outputPath,
     afterPath: afterObservation?.outputPath,
-    maxImages: 4,
+    maxImages: 3,
     resultFrameAfterFinalIntent
   });
   const imagePaths = [];
@@ -985,20 +1045,40 @@ async function compilePassiveObservation({ skill, beforeObservation, afterObserv
   }
   if (imagePaths.length < 2) throw new Error('At least the initial and final observation frames are required for semantic compilation.');
 
-  const vision = await analyzeImagesWithLmStudio({
-    baseUrl: config.lmStudioBaseUrl,
-    model: config.teacherModel,
-    imagePaths: imagePaths.slice(0, 4),
-    systemPrompt: OBSERVATION_COMPILER_SYSTEM_PROMPT,
-    prompt: buildObservationCompilerPrompt({
-      skill,
-      beforeSha256: beforeObservation?.sha256,
-      afterSha256: afterObservation?.sha256,
-      resultFrameAfterFinalIntent
-    }),
-    maxOutputTokens: 2_600,
-    timeoutMs: 300_000
+  const compilerPrompt = buildObservationCompilerPrompt({
+    skill,
+    beforeSha256: beforeObservation?.sha256,
+    afterSha256: afterObservation?.sha256,
+    resultFrameAfterFinalIntent
   });
+  let selectedImagePaths = imagePaths.slice(0, 3);
+  let contextFallbackUsed = false;
+  let vision;
+  try {
+    vision = await analyzeImagesWithLmStudio({
+      baseUrl: config.lmStudioBaseUrl,
+      model: config.teacherModel,
+      imagePaths: selectedImagePaths,
+      systemPrompt: OBSERVATION_COMPILER_SYSTEM_PROMPT,
+      prompt: compilerPrompt,
+      maxOutputTokens: 2_600,
+      timeoutMs: 300_000
+    });
+  } catch (error) {
+    const contextOverflow = /exceed(?:s|ed)?.*context|context size|exceed_context_size/i.test(String(error?.message || error));
+    if (!contextOverflow || selectedImagePaths.length <= 2) throw error;
+    selectedImagePaths = [selectedImagePaths[0], selectedImagePaths.at(-1)];
+    contextFallbackUsed = true;
+    vision = await analyzeImagesWithLmStudio({
+      baseUrl: config.lmStudioBaseUrl,
+      model: config.teacherModel,
+      imagePaths: selectedImagePaths,
+      systemPrompt: OBSERVATION_COMPILER_SYSTEM_PROMPT,
+      prompt: compilerPrompt,
+      maxOutputTokens: 2_600,
+      timeoutMs: 300_000
+    });
+  }
   const semanticExperience = normalizeObservationExperience(vision.analysis, {
     skill,
     beforeSha256: beforeObservation?.sha256,
@@ -1006,8 +1086,8 @@ async function compilePassiveObservation({ skill, beforeObservation, afterObserv
     resultFrameAfterFinalIntent
   });
   semanticExperience.model = vision.model;
-  semanticExperience.imagePaths = imagePaths.slice(0, 4);
-  semanticExperience.stats = vision.stats;
+  semanticExperience.imagePaths = selectedImagePaths;
+  semanticExperience.stats = { ...vision.stats, contextFallbackUsed };
 
   const learnedUpdates = [];
   if (resultFrameAfterFinalIntent === true && semanticExperience.understood && semanticExperience.confidence >= 0.55) {
@@ -1020,6 +1100,20 @@ async function compilePassiveObservation({ skill, beforeObservation, afterObserv
     }
   }
   return { semanticExperience, learnedUpdates };
+}
+
+async function recordedFrameObservation(frame, bounds) {
+  const outputPath = typeof frame?.imagePath === 'string' ? frame.imagePath : '';
+  if (!outputPath) return null;
+  const bytes = await fs.readFile(outputPath);
+  return {
+    schemaVersion: 1,
+    capturedAt: new Date().toISOString(),
+    outputPath,
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    bounds
+  };
 }
 
 function pruneSkillRuns() {
@@ -1192,20 +1286,41 @@ function boundedUiRequest(request) {
   });
 }
 
-function observableDesktopBounds() {
-  const screens = diagnostics?.hardware?.screens?.filter((screen) => screen?.bounds && screen.bounds.width > 0 && screen.bounds.height > 0) || [];
-  if (screens.length === 0) return resolveUiAutomationDisplay(diagnostics, config.assignedDisplay).bounds;
-  const left = Math.min(...screens.map((screen) => screen.bounds.x));
-  const top = Math.min(...screens.map((screen) => screen.bounds.y));
-  const right = Math.max(...screens.map((screen) => screen.bounds.x + screen.bounds.width));
-  const bottom = Math.max(...screens.map((screen) => screen.bounds.y + screen.bounds.height));
-  return { x: left, y: top, width: right - left, height: bottom - top };
+async function inspectPlanningSurface(windowHandle) {
+  const base = await runUiAutomation(
+    config.uiaScript,
+    boundedUiRequest({ operation: 'inspect', windowHandle, maxDepth: 8, maxElements: 1_000 }),
+    { timeoutMs: 30_000 }
+  );
+  let surface = base;
+  try {
+    const focused = await runUiAutomation(
+      config.uiaScript,
+      passiveLearningUiRequest({ operation: 'foregroundWindow' }),
+      { timeoutMs: 15_000 }
+    );
+    const focusedHandle = Number(focused.window?.nativeWindowHandle);
+    if (Number.isInteger(focusedHandle) && focusedHandle > 0 && focusedHandle !== windowHandle &&
+        Number(focused.window?.processId) === Number(base.window?.processId)) {
+      surface = await runUiAutomation(
+        config.uiaScript,
+        boundedUiRequest({ operation: 'inspect', windowHandle: focusedHandle, maxDepth: 8, maxElements: 1_000 }),
+        { timeoutMs: 30_000 }
+      );
+    }
+  } catch { }
+  return {
+    window: base.window,
+    elements: surface.elements || [],
+    actionWindowHandle: Number(surface.window?.nativeWindowHandle) || windowHandle,
+    activeSurface: surface.window || base.window
+  };
 }
 
 function passiveLearningUiRequest(request) {
   return {
     ...request,
-    allowedBounds: observableDesktopBounds(),
+    allowedBounds: resolveUiAutomationDisplay(diagnostics, config.assignedDisplay).bounds,
     forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
   };
 }
@@ -1337,6 +1452,10 @@ async function tryCreateQueuedMiniPlanActionPlan({ mission, inspected, observati
     if (miniPlan) mission.pendingMiniPlan = null;
     return null;
   }
+  if (inspected.actionWindowHandle && inspected.actionWindowHandle !== mission.windowHandle) {
+    await discardMissionMiniPlan(mission, 'modal_surface_changed');
+    return null;
+  }
   const queued = miniPlan.steps[miniPlan.nextIndex];
   let rebound;
   try {
@@ -1430,11 +1549,7 @@ function assertMissionPlanningActive(mission) {
 }
 
 async function createWindowActionPlan({ windowHandle, instruction, mission = null }) {
-  const inspected = await runUiAutomation(
-    config.uiaScript,
-    boundedUiRequest({ operation: 'inspect', windowHandle, maxDepth: 8, maxElements: 1_000 }),
-    { timeoutMs: 30_000 }
-  );
+  const inspected = await inspectPlanningSurface(windowHandle);
   recordInterfaceInspection(inspected, 'decision_checkpoint');
   if (mission && !sameWindowIdentity(inspected.window, mission.window)) {
     const error = new Error('The target window process, handle, or active document changed. Start a new mission for the current document.');
@@ -1448,11 +1563,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
 
   await fs.mkdir(config.observationsDirectory, { recursive: true });
   const outputPath = path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-agent-before.png`);
-  const observation = await captureWindow({
-    scriptPath: config.windowCaptureScript,
-    windowHandle,
-    outputPath
-  });
+  const observation = await captureAssignedDisplayFrame(outputPath);
   const temporalKeyframes = windowObserver?.windowHandle === windowHandle
     ? await windowObserver.recentKeyframePaths({ limit: 2 })
     : [];
@@ -1591,9 +1702,12 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     : '';
   assertMissionPlanningActive(mission);
   const temporalPrompt = temporalImagePaths.length > 1
-    ? `\nНаблюдение содержит ${temporalImagePaths.length} последовательных кадров выбранного окна от старого к свежему. Определи изменение и прогресс, но выбирай действие и координаты только по последнему кадру.`
+    ? `\nНаблюдение содержит ${temporalImagePaths.length} последовательных кадров правого монитора от старого к свежему. Определи изменение и прогресс, но выбирай действие и координаты только по последнему кадру.`
     : '';
-  const planningContextParts = [historyPrompt, guidancePrompt, interfacePrompt, demonstrationPrompt, feedbackPrompt, principlePrompt, teacherExperiencePrompt, freedomPrompt, proactiveResearchPrompt, temporalPrompt];
+  const activeSurfacePrompt = inspected.actionWindowHandle !== windowHandle
+    ? `\nВ выбранном приложении открыт активный модальный диалог: ${JSON.stringify({ name: inspected.activeSurface?.name, processName: inspected.activeSurface?.processName })}. Следующий шаг должен учитывать этот диалог; не действуй по перекрытому окну позади него.`
+    : '';
+  const planningContextParts = [historyPrompt, guidancePrompt, interfacePrompt, demonstrationPrompt, feedbackPrompt, principlePrompt, teacherExperiencePrompt, freedomPrompt, proactiveResearchPrompt, temporalPrompt, activeSurfacePrompt];
   let vision = await analyzeObservedWindow({
     systemPrompt: PLANNER_SYSTEM_PROMPT,
     prompt: buildBoundedPlannerPrompt({
@@ -1868,7 +1982,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
   }
   assertMissionPlanningActive(mission);
   const proposal = planned.proposal;
-  const pointerAction = toScreenPointerAction(proposal.action, observation.bounds, windowHandle);
+  const pointerAction = toScreenPointerAction(proposal.action, observation.bounds, inspected.actionWindowHandle);
   const policy = evaluateActionPolicy({ proposal, processName: inspected.window.processName });
   const planId = randomUUID();
   const now = Date.now();
@@ -1881,6 +1995,7 @@ async function createWindowActionPlan({ windowHandle, instruction, mission = nul
     expiresAtMs: now + actionPlanTtlMs,
     instruction: planningInstruction,
     window: inspected.window,
+    activeSurface: inspected.activeSurface,
     observation,
     proposal: { ...proposal, requiresConfirmation: policy.requiresConfirmation },
     policy,
@@ -2200,11 +2315,7 @@ const server = http.createServer(async (request, response) => {
 
       await fs.mkdir(config.observationsDirectory, { recursive: true });
       const outputPath = path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-window.png`);
-      const observation = await captureWindow({
-        scriptPath: config.windowCaptureScript,
-        windowHandle: input.windowHandle,
-        outputPath
-      });
+      const observation = await captureAssignedDisplayFrame(outputPath);
       const vision = await analyzeImageWithLmStudio({
         baseUrl: config.lmStudioBaseUrl,
         model: config.lmStudioModel,
@@ -2378,9 +2489,10 @@ const server = http.createServer(async (request, response) => {
         })
       );
       const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+      const executionBounds = intersectBounds(display.bounds, inspected.window.bounds);
       const bridgeRequest = createBoundedPointerRequest({
         action,
-        allowedBounds: display.bounds,
+        allowedBounds: executionBounds,
         forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
       });
       const pointerPoint = action.action === 'drag' ? action.to : action.point;
@@ -2459,6 +2571,7 @@ const server = http.createServer(async (request, response) => {
         instruction,
         windowHandle: input.windowHandle,
         processId: inspected.window.processId,
+        windowIdentity: inspected.window,
         window: inspected.window,
         stepCount: 0,
         maxSteps: Math.min(Math.max(Math.round(Number(input.maxSteps) || 20), 2), 50),
@@ -2692,11 +2805,7 @@ const server = http.createServer(async (request, response) => {
         return sendJson(response, 200, { planId: plan.planId, actionsPerformed: false, done: true, proposal: plan.proposal });
       }
 
-      const inspected = await runUiAutomation(
-        config.uiaScript,
-        boundedUiRequest({ operation: 'inspect', windowHandle: plan.window.nativeWindowHandle, maxDepth: 0, maxElements: 1 }),
-        { timeoutMs: 30_000 }
-      );
+      const inspected = await inspectPlanningSurface(plan.window.nativeWindowHandle);
       const freshness = assessPlanWindow({ plans: actionPlans, plan, currentWindow: inspected.window });
       if (freshness.status !== 'fresh') {
         await discardMissionMiniPlan(executionMission, 'pre_action_window_changed', { planId: plan.planId });
@@ -2706,11 +2815,9 @@ const server = http.createServer(async (request, response) => {
         });
       }
       await fs.mkdir(config.observationsDirectory, { recursive: true });
-      const preActionObservation = await captureWindow({
-        scriptPath: config.windowCaptureScript,
-        windowHandle: plan.window.nativeWindowHandle,
-        outputPath: path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-action-before.png`)
-      });
+      const preActionObservation = await captureAssignedDisplayFrame(
+        path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-action-before.png`)
+      );
       plan.beforeScreenshot = preActionObservation.outputPath;
       plan.beforeSha256 = preActionObservation.sha256;
       const visualFreshness = assessPreActionObservation({
@@ -2743,9 +2850,13 @@ const server = http.createServer(async (request, response) => {
           await new Promise((resolve) => setTimeout(resolve, plan.proposal.action.durationMs));
         } else {
           const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+          const executionBounds = intersectBounds(
+            display.bounds,
+            inspected.activeSurface?.bounds || inspected.window.bounds
+          );
           const bridgeRequest = createBoundedPointerRequest({
             action: plan.pointerAction,
-            allowedBounds: display.bounds,
+            allowedBounds: executionBounds,
             forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
           });
           pointerPoint = bridgeRequest.action === 'drag' ? bridgeRequest.to : bridgeRequest.point;
@@ -3019,6 +3130,7 @@ const server = http.createServer(async (request, response) => {
           return sendJson(response, 409, { error: 'step_not_executed', message: 'Only a completed step can be rated.' });
         }
         record = buildPlanFeedback({ plan, rating, feedbackId: randomUUID() });
+        plan.humanFeedback = rating;
         mission = plan.missionId ? missions.get(plan.missionId) : null;
         if (mission?.history.length) {
           mission.history[mission.history.length - 1].humanFeedback = rating;
@@ -3047,6 +3159,15 @@ const server = http.createServer(async (request, response) => {
           visualEvidence: execution.visualEvidence
         });
         run.lastExecution.humanFeedback = rating;
+        if (rating === 'negative') {
+          run.stepIndex = execution.executedStepIndex;
+          run.status = 'needs_review';
+        } else {
+          // Human feedback is the final authority when the visual comparison
+          // is uncertain. Continue the same causal run; never branch into an
+          // unrelated autonomous mission.
+          run.status = run.stepIndex >= run.steps.length ? 'complete' : 'ready';
+        }
       } else {
         return sendJson(response, 400, { error: 'invalid_feedback_target', message: 'planId or runId is required.' });
       }
@@ -3073,7 +3194,17 @@ const server = http.createServer(async (request, response) => {
         created: saved.created,
         feedback: saved.record,
         mission: publicMission(mission),
-        skillRun: run ? { runId: run.runId, status: run.status, stepIndex: run.stepIndex } : null,
+        skillRun: run ? {
+          runId: run.runId,
+          status: run.status,
+          stepIndex: run.stepIndex,
+          currentStep: run.status === 'ready'
+            ? publicLearnedStepForProcess(
+                run.steps[run.stepIndex],
+                run.lastExecution?.window?.processName || run.skill.application?.processName
+              )
+            : null
+        } : null,
         knowledge: {
           principleId: knowledge.principle?.principleId || null,
           principleCount: knowledge.store.principles.length
@@ -3476,7 +3607,7 @@ const server = http.createServer(async (request, response) => {
         return sendJson(response, 409, { error: 'teaching_already_active', message: 'Finish or cancel the current demonstration first.' });
       }
       const input = await readJson(request);
-      const passiveLearning = input.learningMode === 'passive' || input.captureForeground === true;
+      const passiveLearning = input.learningMode === 'passive' || input.captureForeground === true || input.captureDisplay === true;
       if (!passiveLearning && (!Number.isInteger(input.windowHandle) || input.windowHandle <= 0)) {
         return sendJson(response, 400, { error: 'invalid_window', message: 'windowHandle must be a positive integer.' });
       }
@@ -3499,30 +3630,37 @@ const server = http.createServer(async (request, response) => {
       );
       pruneMissions();
       let suspendedMissions = [];
-      let targetWindowHandle = input.windowHandle;
-      if (input.captureForeground === true) {
-        const focused = await runUiAutomation(
-          config.uiaScript,
-          passiveLearningUiRequest({ operation: 'foregroundWindow' }),
-          { timeoutMs: 15_000 }
-        );
-        targetWindowHandle = focused.window?.nativeWindowHandle;
+      const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+      const recordingBounds = display.bounds;
+      const targetWindowHandle = passiveLearning ? 0 : input.windowHandle;
+      if (!passiveLearning && (!Number.isInteger(targetWindowHandle) || targetWindowHandle <= 0)) {
+        return sendJson(response, 400, { error: 'invalid_window', message: 'Could not identify the selected application.' });
       }
-      if (!Number.isInteger(targetWindowHandle) || targetWindowHandle <= 0) {
-        return sendJson(response, 400, { error: 'invalid_window', message: 'Could not identify the application selected for passive learning.' });
-      }
-      const inspected = await runUiAutomation(
-        config.uiaScript,
-        (passiveLearning ? passiveLearningUiRequest : boundedUiRequest)({
-          operation: 'inspect', windowHandle: targetWindowHandle, maxDepth: 7, maxElements: 1_000
-        }),
-        { timeoutMs: 30_000 }
-      );
+      const inspected = passiveLearning
+        ? {
+            window: {
+              nativeWindowHandle: 0,
+              processId: 0,
+              processName: 'AssignedDisplay',
+              name: `Правый монитор ${display.deviceName}`,
+              className: 'Display',
+              controlType: 'Window',
+              bounds: recordingBounds
+            },
+            elements: []
+          }
+        : await runUiAutomation(
+            config.uiaScript,
+            boundedUiRequest({
+              operation: 'inspect', windowHandle: targetWindowHandle, maxDepth: 7, maxElements: 1_000
+            }),
+            { timeoutMs: 30_000 }
+          );
       const sessionId = randomUUID();
       const sessionDirectory = path.join(config.teachingDirectory, sessionId);
       await fs.mkdir(sessionDirectory, { recursive: true });
       const beforePath = path.join(sessionDirectory, 'before.png');
-      const beforeObservation = await captureWindow({
+      const beforeObservation = passiveLearning ? null : await captureWindow({
         scriptPath: config.windowCaptureScript,
         windowHandle: targetWindowHandle,
         outputPath: beforePath
@@ -3531,12 +3669,11 @@ const server = http.createServer(async (request, response) => {
       const livePath = path.join(sessionDirectory, 'live.json');
       const readyPath = path.join(sessionDirectory, 'ready');
       const stopPath = path.join(sessionDirectory, 'stop');
-      const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
-      const recordingBounds = passiveLearning ? observableDesktopBounds() : display.bounds;
       const recorder = await startTeachingRecorder({
         scriptPath: config.teachingRecorderScript,
         recorderConfig: {
           targetWindowHandle,
+          captureAllWindows: passiveLearning,
           allowedBounds: recordingBounds,
           outputPath,
           livePath,
@@ -3550,7 +3687,9 @@ const server = http.createServer(async (request, response) => {
         await fs.writeFile(stopPath, 'startup timeout', 'utf8');
         return sendJson(response, 500, { error: 'recorder_start_failed', message: 'The demonstration recorder did not become ready.' });
       }
-      suspendedMissions = suspendMissionsForTeaching(missions, targetWindowHandle, { ttlMs: missionTtlMs });
+      suspendedMissions = passiveLearning
+        ? []
+        : suspendMissionsForTeaching(missions, targetWindowHandle, { ttlMs: missionTtlMs });
       const now = Date.now();
       teachingSession = {
         sessionId,
@@ -3571,6 +3710,8 @@ const server = http.createServer(async (request, response) => {
         injectedEvents: [],
         suspendedMissions,
         learningMode: passiveLearning ? 'passive' : 'demonstration'
+        ,captureScope: passiveLearning ? 'assigned_display' : 'window'
+        ,recordingBounds
       };
       await audit('teaching.started', {
         sessionId, windowHandle: targetWindowHandle, processName: inspected.window?.processName || null,
@@ -3585,10 +3726,10 @@ const server = http.createServer(async (request, response) => {
         expiresAt: teachingSession.expiresAt,
         window: inspected.window,
         learningMode: teachingSession.learningMode,
-        scope: { display: passiveLearning ? 'all-displays' : display.deviceName, bounds: recordingBounds, targetWindowOnly: true },
-        privacy: { passwordValuesRecorded: false, targetWindowOnly: true },
+        scope: { display: display.deviceName, bounds: recordingBounds, targetWindowOnly: !passiveLearning },
+        privacy: { passwordValuesRecorded: false, targetWindowOnly: !passiveLearning },
         message: passiveLearning
-          ? 'Пассивное обучение записывает только ваши действия в выбранном окне; агент сам не нажимает.'
+          ? 'Наблюдение записывает весь правый монитор, включая все окна и всплывающие диалоги; агент сам не нажимает.'
           : 'Demonstration recording is active only inside the selected window.'
       });
     }
@@ -3607,22 +3748,60 @@ const server = http.createServer(async (request, response) => {
       }
       const recording = JSON.parse(await fs.readFile(session.outputPath, 'utf8'));
       recording.events = [...(recording.events ?? []), ...(session.injectedEvents ?? [])];
-      const inspected = await runUiAutomation(
-        config.uiaScript,
-        (session.learningMode === 'passive' ? passiveLearningUiRequest : boundedUiRequest)({
-          operation: 'inspect', windowHandle: session.window.nativeWindowHandle, maxDepth: 7, maxElements: 1_000
-        }),
-        { timeoutMs: 30_000 }
-      );
-      const afterPath = path.join(session.sessionDirectory, 'after.png');
-      const afterObservation = await captureWindow({
-        scriptPath: config.windowCaptureScript,
-        windowHandle: session.window.nativeWindowHandle,
-        outputPath: afterPath
-      });
+      let observationPartition = null;
+      if (session.learningMode === 'passive') {
+        observationPartition = partitionObservationEvents(recording.events);
+        recording.rawEventCount = recording.events.length;
+        recording.events = observationPartition.events;
+        recording.guidance = observationPartition.guidance;
+        recording.observedApplications = observationPartition.observedApplications;
+        recording.primaryApplication = observationPartition.primaryApplication;
+        recording.captureScope = 'assigned_display';
+        recording.captureBounds = session.recordingBounds;
+      }
+      const inspected = session.learningMode === 'passive'
+        ? { window: session.window, elements: [] }
+        : await runUiAutomation(
+            config.uiaScript,
+            boundedUiRequest({
+              operation: 'inspect', windowHandle: session.window.nativeWindowHandle, maxDepth: 7, maxElements: 1_000
+            }),
+            { timeoutMs: 30_000 }
+          );
+      let beforeObservation = session.beforeObservation;
+      let afterObservation;
+      let finalRecordedFrame = null;
+      if (session.learningMode === 'passive') {
+        const frames = [...(recording.visualFrames || [])].sort((left, right) => Number(left.atMs) - Number(right.atMs));
+        beforeObservation = await recordedFrameObservation(frames[0], session.recordingBounds);
+        finalRecordedFrame = selectFinalMeaningfulFrame(frames, {
+          throughSequence: observationPartition.lastMeaningfulSequence,
+          lastMeaningfulAtMs: observationPartition.lastMeaningfulAtMs,
+          beforeControllerAtMs: observationPartition.firstControllerEventAfterResultAtMs
+        });
+        const fallbackRecordedFrame = finalRecordedFrame || frames.find((frame) =>
+          Number(frame.atMs) < Number(observationPartition.firstControllerEventAfterResultAtMs)
+        ) || frames[0];
+        afterObservation = await recordedFrameObservation(fallbackRecordedFrame, session.recordingBounds);
+        if (!beforeObservation || !afterObservation) {
+          resumeMissionsAfterTeaching(missions, session, { cancelled: true, ttlMs: missionTtlMs });
+          teachingSession = null;
+          return sendJson(response, 422, {
+            error: 'desktop_observation_frames_missing',
+            message: 'The full-desktop recorder did not preserve both the initial and final meaningful frames.'
+          });
+        }
+      } else {
+        const afterPath = path.join(session.sessionDirectory, 'after.png');
+        afterObservation = await captureWindow({
+          scriptPath: config.windowCaptureScript,
+          windowHandle: session.window.nativeWindowHandle,
+          outputPath: afterPath
+        });
+      }
       recording.initialVisualFrame = {
-        imagePath: session.beforeObservation.outputPath,
-        sha256: session.beforeObservation.sha256,
+        imagePath: beforeObservation.outputPath,
+        sha256: beforeObservation.sha256,
         capturedAt: session.startedAt,
         atMs: 0,
         throughSequence: 0
@@ -3631,19 +3810,27 @@ const server = http.createServer(async (request, response) => {
         imagePath: afterObservation.outputPath,
         sha256: afterObservation.sha256,
         capturedAt: new Date().toISOString(),
-        atMs: Math.max(0, Number(recording.events?.at(-1)?.atMs) || 0) + 1,
-        throughSequence: Math.max(0, ...((recording.events ?? []).map((event) => Number(event.sequence) || 0)))
+        atMs: Number(finalRecordedFrame?.atMs) || Math.max(0, Number(recording.events?.at(-1)?.atMs) || 0) + 1,
+        throughSequence: Number(finalRecordedFrame?.throughSequence) || Math.max(0, ...((recording.events ?? []).map((event) => Number(event.sequence) || 0)))
       };
       const skillId = randomUUID();
       let skill;
       try {
+        const recordingWindow = recording.primaryApplication
+          ? {
+              ...inspected.window,
+              processName: recording.primaryApplication.processName,
+              name: recording.primaryApplication.windowName || inspected.window.name,
+              bounds: recording.primaryApplication.windowBounds || inspected.window.bounds
+            }
+          : inspected.window;
         skill = buildSkillFromRecording({
           skillId,
           name: session.name,
           instruction: session.instruction,
-          window: inspected.window,
+          window: recordingWindow,
           recording,
-          elements: inspected.elements
+          elements: recording.primaryApplication ? [] : inspected.elements
         });
       } catch (error) {
         resumeMissionsAfterTeaching(missions, session, { cancelled: true, ttlMs: missionTtlMs });
@@ -3656,10 +3843,15 @@ const server = http.createServer(async (request, response) => {
        }
        skill.learningMode = session.learningMode || 'demonstration';
        const browserLikeRecording = /^(browser|chrome|msedge|firefox)$/i.test(String(skill.application?.processName || ''));
-       const resultFrameAfterFinalIntent = recording.stopReason === 'hotkey' || recording.stopReason === 'timeout' || !browserLikeRecording;
+       const resultFrameAfterFinalIntent = session.learningMode === 'passive'
+         ? Boolean(observationPartition?.lastMeaningfulSequence && finalRecordedFrame && afterObservation)
+         : (recording.stopReason === 'hotkey' || recording.stopReason === 'timeout' || !browserLikeRecording);
        skill.captureContext = {
          stopReason: recording.stopReason || 'controller',
-         resultFrameAfterFinalIntent
+         resultFrameAfterFinalIntent,
+         scope: session.captureScope || 'window',
+         bounds: session.recordingBounds || inspected.window.bounds,
+         ignoredControllerOrGuidanceEvents: observationPartition?.ignoredEventCount || 0
        };
        skill.executionPolicy = session.learningMode === 'passive'
          ? {
@@ -3684,15 +3876,16 @@ const server = http.createServer(async (request, response) => {
        let semanticCompilationError = null;
        if (session.learningMode === 'passive') {
          try {
-           semanticCompilation = await compilePassiveObservation({
-             skill,
-             beforeObservation: session.beforeObservation,
+            semanticCompilation = await compilePassiveObservation({
+              skill,
+              beforeObservation,
              afterObservation,
              resultFrameAfterFinalIntent
            });
            skill.semanticExperience = semanticCompilation.semanticExperience;
-           skill.compilationStatus = semanticCompilation.semanticExperience.understood
-             ? 'compiled_observation'
+           skill = compileCausalReplaySkill(skill);
+           skill.compilationStatus = skill.causalReplay?.ready === true
+             ? 'causal_skill_ready'
              : 'needs_review';
          } catch (error) {
            semanticCompilationError = String(error.message || error).slice(0, 800);
@@ -3726,7 +3919,7 @@ const server = http.createServer(async (request, response) => {
          evidence: {
           eventCount: recording.events?.length ?? 0,
           stepFrameCount: recording.visualFrames?.length ?? 0,
-          beforeScreenshot: session.beforeObservation.outputPath,
+           beforeScreenshot: beforeObservation.outputPath,
           afterScreenshot: afterObservation.outputPath
         }
       });
@@ -3847,13 +4040,26 @@ const server = http.createServer(async (request, response) => {
       }
       const runId = randomUUID();
       const now = Date.now();
+      const steps = executableSkillSteps(loaded.skill);
+      const startStepIndex = input.startStepIndex == null ? 0 : Number(input.startStepIndex);
+      if (!Number.isInteger(startStepIndex) || startStepIndex < 0 || startStepIndex >= steps.length) {
+        return sendJson(response, 400, {
+          error: 'invalid_start_step',
+          message: `startStepIndex must identify one of ${steps.length} executable steps.`
+        });
+      }
       const run = {
         runId,
         skill: loaded.skill,
         skillPath: loaded.skillPath,
+        steps,
+        skillGraph: loaded.skill.skillGraph || null,
+        currentNodeId: loaded.skill.skillGraph?.nodes?.some((node) => node.nodeId === `precondition:${startStepIndex}`)
+          ? `precondition:${startStepIndex}`
+          : null,
         windowHandle: input.windowHandle,
         processId: inspected.window.processId,
-        stepIndex: 0,
+        stepIndex: startStepIndex,
         status: 'ready',
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + 10 * 60 * 1000).toISOString(),
@@ -3863,11 +4069,18 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 201, {
         runId,
         status: run.status,
+        startStepIndex,
         createdAt: run.createdAt,
         expiresAt: run.expiresAt,
-        skill: { skillId: run.skill.skillId, name: run.skill.name, instruction: run.skill.instruction, stepCount: run.skill.steps.length },
+        skill: {
+          skillId: run.skill.skillId,
+          name: run.skill.name,
+          instruction: run.skill.instruction,
+          stepCount: run.steps.length,
+          causalReplay: run.skill.causalReplay || null
+        },
         window: inspected.window,
-        currentStep: publicLearnedStepForProcess(run.skill.steps[0], inspected.window.processName),
+        currentStep: publicLearnedStepForProcess(run.steps[startStepIndex], inspected.window.processName),
         actionsPerformed: false
       });
     }
@@ -3889,7 +4102,8 @@ const server = http.createServer(async (request, response) => {
       if (input.confirmed !== true) {
         return sendJson(response, 409, { error: 'confirmation_required', message: 'confirmed=true is required for every learned step.' });
       }
-      const step = run.skill.steps[run.stepIndex];
+      const step = run.steps[run.stepIndex];
+      run.currentNodeId = run.skillGraph ? `precondition:${run.stepIndex}` : null;
       const inspected = await runUiAutomation(
         config.uiaScript,
         boundedUiRequest({
@@ -3906,20 +4120,35 @@ const server = http.createServer(async (request, response) => {
       } catch (error) {
         return sendJson(response, 409, { error: 'skill_app_mismatch', message: error.message });
       }
-      if (inspected.window.processId !== run.processId) {
-        return sendJson(response, 409, { error: 'stale_skill_run', message: 'The target application was restarted. Prepare the skill again.' });
+      if (!sameWindowIdentity(inspected.window, run.windowIdentity)) {
+        run.status = 'needs_review';
+        run.currentNodeId = run.skillGraph ? `recovery:${run.stepIndex}` : null;
+        return sendJson(response, 409, {
+          error: 'stale_skill_run',
+          message: 'The target process, window, or active document changed. Prepare the skill again for the current document.'
+        });
       }
 
       const grounding = groundLearnedStepToElements(step, inspected.elements, inspected.window.bounds);
+      if (grounding.blocked === true) {
+        run.status = 'needs_review';
+        run.currentNodeId = run.skillGraph ? `recovery:${run.stepIndex}` : null;
+        return sendJson(response, 409, {
+          error: 'learned_step_needs_rebind',
+          message: 'The demonstrated surface moved or changed so the recorded semantic point is no longer inside it.',
+          runId: run.runId,
+          stepIndex: run.stepIndex,
+          grounding
+        });
+      }
       const pointerAction = learnedStepToPointerAction(grounding.step, inspected.window.bounds, run.windowHandle);
+      run.currentNodeId = run.skillGraph ? `action:${run.stepIndex}` : null;
       const pointerPoint = pointerAction.action === 'drag' ? pointerAction.to : (pointerAction.point ?? null);
       const stepPolicy = evaluateLearnedStepPolicy({ step, processName: inspected.window.processName });
       await fs.mkdir(config.observationsDirectory, { recursive: true });
-      const beforeObservation = await captureWindow({
-        scriptPath: config.windowCaptureScript,
-        windowHandle: run.windowHandle,
-        outputPath: path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-learned-before.png`)
-      });
+      const beforeObservation = await captureAssignedDisplayFrame(
+        path.join(config.observationsDirectory, `${Date.now()}-${randomUUID()}-learned-before.png`)
+      );
       const observerBaseline = await ensureWindowEventObserver(run.windowHandle, 'active');
       await audit('action.confirmed', {
         channel: 'learned-skill', runId: run.runId, skillId: run.skill.skillId,
@@ -3956,9 +4185,10 @@ const server = http.createServer(async (request, response) => {
         }
         if (!actionResult) {
           const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+          const executionBounds = intersectBounds(display.bounds, inspected.window.bounds);
           const bridgeRequest = createBoundedPointerRequest({
             action: pointerAction,
-            allowedBounds: display.bounds,
+            allowedBounds: executionBounds,
             forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
           });
           actionResult = await runPointerAction(config.pointerBridgeScript, bridgeRequest, { timeoutMs: 10_000 });
@@ -4024,7 +4254,9 @@ const server = http.createServer(async (request, response) => {
       if (validationDecision.route !== 'deterministic') {
         validation = applySettlingEvidence(validation, settling, { actionType: step.type });
       }
-      const isFinalStep = run.stepIndex >= run.skill.steps.length - 1;
+      const stepReferenceValidation = await compareSkillStepReference(run.skill, step, afterObservation);
+      if (stepReferenceValidation) validation = applyReferenceComparison(validation, stepReferenceValidation);
+      const isFinalStep = run.stepIndex >= run.steps.length - 1;
       const referenceValidation = isFinalStep
         ? await compareSkillVisualReference(run.skill, afterObservation)
         : null;
@@ -4045,11 +4277,17 @@ const server = http.createServer(async (request, response) => {
       run.stepIndex += 1;
       run.status = isFinalStep
         ? (validation.success && referenceValidation?.status === 'matched' ? 'complete' : 'needs_review')
-        : 'ready';
+        : (validation.success ? 'ready' : 'needs_review');
+      run.currentNodeId = run.status === 'complete'
+        ? 'complete'
+        : run.status === 'ready'
+          ? (run.skillGraph ? `precondition:${run.stepIndex}` : null)
+          : (run.skillGraph ? `recovery:${executedStepIndex}` : null);
       run.lastExecution = {
         executedStepIndex,
         step,
         validation,
+        stepReferenceValidation,
         referenceValidation,
         window: inspected.window,
         visualEvidence: {
@@ -4083,11 +4321,12 @@ const server = http.createServer(async (request, response) => {
         actionResult,
         validation,
         validationRoute: validationDecision.route,
+        stepReferenceValidation,
         referenceValidation,
         settling,
         afterScreenshot: afterObservation.outputPath,
-        nextStep: run.status === 'ready'
-          ? publicLearnedStepForProcess(run.skill.steps[run.stepIndex], inspected.window.processName)
+        nextStep: !isFinalStep
+          ? publicLearnedStepForProcess(run.steps[run.stepIndex], inspected.window.processName)
           : null
       });
     }
@@ -4099,6 +4338,111 @@ const server = http.createServer(async (request, response) => {
       run.status = 'cancelled';
       skillRuns.delete(run.runId);
       return sendJson(response, 200, { runId: run.runId, status: 'cancelled' });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/skills/apply-demonstrated-correction') {
+      const input = await readJson(request);
+      let original;
+      let correction;
+      try {
+        original = await loadSkill(input.originalSkillId);
+        correction = await loadSkill(input.correctionSkillId);
+      } catch (error) {
+        return sendJson(response, error.code === 'ENOENT' ? 404 : 400, { error: 'skill_not_found', message: error.message });
+      }
+      if (String(original.skill.application?.processName || '').toLowerCase() !==
+          String(correction.skill.application?.processName || '').toLowerCase()) {
+        return sendJson(response, 409, { error: 'correction_app_mismatch', message: 'The correction was recorded in another application.' });
+      }
+      try {
+        const patched = replaceSkillStep({
+          skill: original.skill,
+          failedStepIndex: input.failedStepIndex,
+          replacementSteps: executableSkillSteps(correction.skill),
+          source: { kind: 'mini_demonstration', sourceId: correction.skill.skillId }
+        });
+        const resumeStepIndex = patched.resumeStepIndex;
+        delete patched.resumeStepIndex;
+        const compiled = compileCausalReplaySkill(patched);
+        const backupPath = await persistSkillRevision({
+          skillPath: original.skillPath,
+          previousSkill: original.skill,
+          nextSkill: compiled
+        });
+        await audit('skill.correction_applied', {
+          skillId: compiled.skillId,
+          failedStepIndex: Number(input.failedStepIndex),
+          replacementSkillId: correction.skill.skillId,
+          replacementStepCount: executableSkillSteps(correction.skill).length,
+          revision: compiled.revision,
+          source: 'mini_demonstration'
+        });
+        return sendJson(response, 200, {
+          applied: true,
+          skillId: compiled.skillId,
+          revision: compiled.revision,
+          stepCount: executableSkillSteps(compiled).length,
+          resumeStepIndex,
+          backupPath
+        });
+      } catch (error) {
+        return sendJson(response, 400, { error: 'invalid_skill_correction', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/skills/apply-plan-correction') {
+      const input = await readJson(request);
+      const plan = typeof input.planId === 'string' ? actionPlans.get(input.planId) : null;
+      if (!isHumanApprovedCorrectionPlan(plan)) {
+        return sendJson(response, 409, { error: 'correction_plan_not_verified', message: 'Only an executed correction plan explicitly approved by the user may replace a skill step.' });
+      }
+      let original;
+      try {
+        original = await loadSkill(input.originalSkillId);
+        if (String(plan.window?.processName || '').toLowerCase() !== String(original.skill.application?.processName || '').toLowerCase()) {
+          return sendJson(response, 409, { error: 'correction_app_mismatch', message: 'The confirmed correction belongs to another application.' });
+        }
+        const replacements = plannerProposalAsCorrectionSteps(plan.proposal, {
+          schemaVersion: 1,
+          beforeImagePath: plan.beforeScreenshot || null,
+          afterImagePath: plan.afterScreenshot || null,
+          beforeSha256: plan.beforeSha256 || null,
+          afterSha256: null,
+          source: 'human-confirmed-plan-correction'
+        });
+        const patched = replaceSkillStep({
+          skill: original.skill,
+          failedStepIndex: input.failedStepIndex,
+          replacementSteps: replacements,
+          source: { kind: 'validated_plan', sourceId: plan.planId }
+        });
+        const resumeStepIndex = patched.resumeStepIndex;
+        delete patched.resumeStepIndex;
+        const compiled = compileCausalReplaySkill(patched);
+        const backupPath = await persistSkillRevision({
+          skillPath: original.skillPath,
+          previousSkill: original.skill,
+          nextSkill: compiled
+        });
+        await audit('skill.correction_applied', {
+          skillId: compiled.skillId,
+          failedStepIndex: Number(input.failedStepIndex),
+          planId: plan.planId,
+          replacementStepCount: replacements.length,
+          revision: compiled.revision,
+          source: 'human_confirmed_plan'
+        });
+        return sendJson(response, 200, {
+          applied: true,
+          skillId: compiled.skillId,
+          revision: compiled.revision,
+          stepCount: executableSkillSteps(compiled).length,
+          resumeStepIndex,
+          backupPath
+        });
+      } catch (error) {
+        return sendJson(response, error.code === 'ENOENT' ? 404 : 400, { error: 'invalid_skill_correction', message: error.message });
+      }
     }
 
     if (request.method === 'POST' && url.pathname === '/tasks') {
@@ -4134,7 +4478,7 @@ const server = http.createServer(async (request, response) => {
     return sendJson(response, 404, { error: 'not_found' });
   } catch (error) {
     return sendJson(response, error.statusCode || 500, {
-      error: 'worker_error',
+      error: error.code || 'worker_error',
       message: error.message
     });
   }

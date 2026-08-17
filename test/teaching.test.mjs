@@ -132,3 +132,34 @@ test('logical demonstration steps keep their own before and after visual evidenc
   assert.equal(skill.steps[1].visualEvidence.beforeImagePath, 'step-1.png');
   assert.equal(skill.steps[1].visualEvidence.afterImagePath, 'step-2.png');
 });
+
+test('desktop observation keeps per-window coordinates and explicit guidance', () => {
+  const skill = buildSkillFromRecording({
+    skillId: 'desktop-skill', name: 'Desktop teaching', instruction: 'Observe the teacher',
+    window: {
+      name: 'Fallback', processName: 'browser', className: 'Chrome_WidgetWin_1',
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 }
+    },
+    recording: {
+      captureScope: 'desktop',
+      captureBounds: { x: 0, y: 0, width: 3840, height: 1080 },
+      primaryApplication: {
+        processName: 'CorelDRW', windowName: 'CorelDRAW - Безымянный-1',
+        windowBounds: { x: 1920, y: 0, width: 1920, height: 1080 }
+      },
+      observedApplications: [{ processName: 'CorelDRW', windowName: 'CorelDRAW - Безымянный-1', count: 1 }],
+      guidance: [{ text: 'Сначала создайте документ, затем подтвердите диалог.' }],
+      events: [{
+        type: 'click', sequence: 1, atMs: 100, x: 2112, y: 216, button: 'left',
+        processName: 'CorelDRW', windowName: 'CorelDRAW - Безымянный-1', windowHandle: 55,
+        windowBounds: { x: 1920, y: 0, width: 1920, height: 1080 }
+      }]
+    },
+    elements: []
+  });
+  assert.equal(skill.application.processName, 'CorelDRW');
+  assert.equal(skill.demonstration.captureScope, 'desktop');
+  assert.match(skill.demonstration.guidance[0].text, /создайте документ/i);
+  assert.deepEqual(skill.steps[0].point, { x: 0.1, y: 0.2 });
+  assert.equal(skill.steps[0].windowContext.processName, 'CorelDRW');
+});

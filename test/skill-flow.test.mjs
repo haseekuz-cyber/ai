@@ -14,3 +14,9 @@ test('confirmed learned step uses the dedicated skill execution route', () => {
   assert.equal(request.path, '/api/skills/execute-step');
   assert.deepEqual(JSON.parse(request.options.body), { runId: 'run-1', confirmed: true });
 });
+
+test('a corrected causal run resumes at the requested step without creating a mission', () => {
+  const request = prepareSavedSkillRequest({ skillId: 'skill-1', windowHandle: 42, startStepIndex: 7 });
+  assert.equal(request.path, '/api/skills/prepare');
+  assert.deepEqual(JSON.parse(request.options.body), { windowHandle: 42, skillId: 'skill-1', startStepIndex: 7 });
+});

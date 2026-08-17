@@ -59,3 +59,12 @@ test('temporal keyframes are deduplicated and returned oldest to newest', () => 
     { keyframePath: 'fresh.png' }
   ], { limit: 2 }), ['middle.png', 'fresh.png']);
 });
+
+test('temporal keyframes preserve the freshest frame and prefer important transitions', () => {
+  assert.deepEqual(selectTemporalKeyframePaths([
+    { keyframePath: 'critical.png', importance: 'critical' },
+    { keyframePath: 'normal.png', importance: 'normal' },
+    { keyframePath: 'low.png', importance: 'low' },
+    { keyframePath: 'fresh.png', importance: 'low' }
+  ], { limit: 3 }), ['critical.png', 'normal.png', 'fresh.png']);
+});

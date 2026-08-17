@@ -10,6 +10,18 @@ Return JSON only:
   "limitations":["anything that cannot be compared safely"]
 }`;
 
+export const STEP_REFERENCE_COMPARATOR_SYSTEM_PROMPT = `You compare two chronological screenshots for one step of a universal Windows skill.
+The first image is the demonstrated result immediately after that step.
+The second image is the current result immediately after replaying the same causal step.
+Judge only the task-relevant local change. Allow harmless differences in cursor position, window geometry, selection highlight and timestamps.
+Return JSON only:
+{
+  "success":true,
+  "evidence":"short Russian explanation of what matched or differed",
+  "confidence":0.0,
+  "limitations":["anything that cannot be compared safely"]
+}`;
+
 function confidence(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(1, Math.max(0, number)) : 0;
