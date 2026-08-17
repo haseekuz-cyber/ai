@@ -50,28 +50,52 @@ function boundedInteger(value, fallback, { minimum, maximum, name }) {
   return number;
 }
 
-async function rg({ executable, root, args, allowNoMatches = false }) {
-  try {
-    const result = await execFileAsync(executable, args, {
-      cwd: root,
-      windowsHide: true,
-      timeout: 30_000,
-      maxBuffer: 8 * 1024 * 1024
-    });
-    return String(result.stdout || '');
-  } catch (error) {
-    if (allowNoMatches && error.code === 1) return '';
-    throw error;
+function globSource(pattern) {
+  let source = '';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === '*' && pattern[index + 1] === '*') {
+      const afterSeparator = index === 0 || pattern[index - 1] === '/';
+      if (afterSeparator && pattern[index + 2] === '/') {
+        source += '(?:.*/)?';
+        index += 2;
+        continue;
+      }
+      source += '.*';
+      index += 1;
+      continue;
+    }
+    if (character === '*') source += '[^/]*';
+    else if (character === '?') source += '[^/]';
+    else source += character.replace(/[.+^${}()|[\]\\]/g, '\\$&');
   }
+  return source;
 }
 
-function exclusionArgs(excludes) {
-  return excludes.flatMap((pattern) => ['--glob', `!${pattern}`]);
+function createExcludeMatcher(patterns) {
+  const wholePath = [];
+  const baseName = [];
+  const directories = [];
+  for (const pattern of patterns) {
+    const expression = new RegExp(`^${globSource(pattern)}$`);
+    if (pattern.includes('/')) wholePath.push(expression);
+    else baseName.push(expression);
+    if (pattern.endsWith('/**')) directories.push(new RegExp(`^${globSource(pattern.slice(0, -3))}$`));
+  }
+  return {
+    file(relativePath) {
+      const name = relativePath.slice(relativePath.lastIndexOf('/') + 1);
+      return wholePath.some((expression) => expression.test(relativePath))
+        || baseName.some((expression) => expression.test(name));
+    },
+    directory(relativePath) {
+      return directories.some((expression) => expression.test(relativePath));
+    }
+  };
 }
 
 export function createRepositoryTools({
   projectRoot,
-  rgExecutable = 'rg',
   excludes = DEFAULT_EXCLUDES,
   maxFiles = 2_000,
   maxMatches = 200,
@@ -79,6 +103,7 @@ export function createRepositoryTools({
 } = {}) {
   if (typeof projectRoot !== 'string' || !projectRoot) throw new TypeError('projectRoot is required.');
   const root = path.resolve(projectRoot);
+  const exclude = createExcludeMatcher(excludes);
 
   async function requestedPaths(paths = ['.']) {
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > 32) {
@@ -98,17 +123,61 @@ export function createRepositoryTools({
     return { ...resolved, stat, buffer, text: buffer.toString('utf8'), fileHash: sha256(buffer) };
   }
 
+  async function trackedFiles(safePaths) {
+    const result = await execFileAsync(
+      'git',
+      ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...safePaths],
+      { cwd: root, windowsHide: true, timeout: 30_000, maxBuffer: 8 * 1024 * 1024 }
+    );
+    return String(result.stdout || '').split('\0').filter(Boolean).map(posixPath);
+  }
+
+  async function walkDirectory(relativeDirectory, collected) {
+    const entries = await fs.readdir(path.join(root, relativeDirectory || '.'), { withFileTypes: true });
+    for (const entry of entries) {
+      const relative = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (!exclude.directory(relative)) await walkDirectory(relative, collected);
+        continue;
+      }
+      if (entry.isFile()) collected.push(relative);
+    }
+  }
+
+  async function walkedFiles(safePaths) {
+    const collected = [];
+    for (const requested of safePaths) {
+      const relative = requested === '.' ? '' : requested;
+      const stat = await fs.stat(path.join(root, relative || '.'));
+      if (stat.isDirectory()) await walkDirectory(relative, collected);
+      else if (stat.isFile() && relative) collected.push(relative);
+    }
+    return collected;
+  }
+
+  async function projectFiles(safePaths) {
+    let listed = null;
+    try {
+      listed = await trackedFiles(safePaths);
+    } catch {
+      listed = null;
+    }
+    if (!listed) listed = await walkedFiles(safePaths);
+    const candidates = [...new Set(listed)].filter((name) => !exclude.file(name)).sort();
+    const files = [];
+    for (const name of candidates) {
+      const stat = await fs.stat(path.join(root, name)).catch(() => null);
+      if (stat && stat.isFile() && stat.size <= maxFileBytes) files.push(name);
+    }
+    return files;
+  }
+
   return Object.freeze({
     async index({ paths = ['.'], limit = maxFiles } = {}) {
       const safePaths = await requestedPaths(paths);
       const safeLimit = boundedInteger(limit, maxFiles, { minimum: 1, maximum: maxFiles, name: 'limit' });
-      const output = await rg({
-        executable: rgExecutable,
-        root,
-        args: ['--files', '--hidden', ...exclusionArgs(excludes), '--', ...safePaths],
-        allowNoMatches: true
-      });
-      const allNames = [...new Set(output.split(/\r?\n/).filter(Boolean).map(posixPath))].sort();
+      const allNames = await projectFiles(safePaths);
       const names = allNames.slice(0, safeLimit);
       const files = [];
       for (const name of names) {
@@ -124,45 +193,37 @@ export function createRepositoryTools({
       const safePaths = await requestedPaths(paths);
       const context = boundedInteger(contextLines, 0, { minimum: 0, maximum: 20, name: 'contextLines' });
       const safeLimit = boundedInteger(limit, maxMatches, { minimum: 1, maximum: maxMatches, name: 'limit' });
-      const output = await rg({
-        executable: rgExecutable,
-        root,
-        args: [
-          '--line-number', '--column', '--no-heading', '--color', 'never', '--fixed-strings',
-          '--hidden', ...exclusionArgs(excludes), '--', query, ...safePaths
-        ],
-        allowNoMatches: true
-      });
-      const rawMatches = [];
-      for (const line of output.split(/\r?\n/)) {
-        const match = line.match(/^(.*?):(\d+):(\d+):(.*)$/);
-        if (!match) continue;
-        rawMatches.push({ path: posixPath(match[1]), line: Number(match[2]), column: Number(match[3]), text: match[4] });
-        if (rawMatches.length >= safeLimit) break;
-      }
-      const cache = new Map();
+      const names = await projectFiles(safePaths);
       const matches = [];
-      for (const match of rawMatches) {
-        let file = cache.get(match.path);
-        if (!file) {
-          file = await readFile(match.path);
-          cache.set(match.path, file);
-        }
+      let truncated = false;
+      for (const name of names) {
+        if (truncated) break;
+        const file = await readFile(name);
+        if (file.buffer.includes(0)) continue;
         const allLines = file.text.split(/\r?\n/);
-        const startLine = Math.max(1, match.line - context);
-        const endLine = Math.min(allLines.length, match.line + context);
-        matches.push({
-          path: file.relative,
-          line: match.line,
-          column: match.column,
-          text: match.text,
-          startLine,
-          endLine,
-          lines: allLines.slice(startLine - 1, endLine).map((text, index) => ({ line: startLine + index, text })),
-          fileHash: file.fileHash
-        });
+        for (let index = 0; index < allLines.length; index += 1) {
+          const column = allLines[index].indexOf(query);
+          if (column < 0) continue;
+          if (matches.length >= safeLimit) {
+            truncated = true;
+            break;
+          }
+          const line = index + 1;
+          const startLine = Math.max(1, line - context);
+          const endLine = Math.min(allLines.length, line + context);
+          matches.push({
+            path: file.relative,
+            line,
+            column: Buffer.byteLength(allLines[index].slice(0, column)) + 1,
+            text: allLines[index],
+            startLine,
+            endLine,
+            lines: allLines.slice(startLine - 1, endLine).map((text, offset) => ({ line: startLine + offset, text })),
+            fileHash: file.fileHash
+          });
+        }
       }
-      return { matches, truncated: rawMatches.length >= safeLimit, limit: safeLimit };
+      return { matches, truncated, limit: safeLimit };
     },
 
     async read({ path: relativePath, startLine = 1, endLine = startLine + 199 } = {}) {
