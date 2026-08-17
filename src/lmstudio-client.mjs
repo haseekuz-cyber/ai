@@ -1,14 +1,32 @@
 import fs from 'node:fs/promises';
+import { config } from './config.mjs';
 import { adaptGuiModelAnalysis } from './gui-model-adapter.mjs';
 import { AGENT_DECISION_SCHEMA, UNIFIED_AGENT_SYSTEM_PROMPT } from './agent-model-protocol.mjs';
 
 const activeRequestControllers = new Set();
 let lmStudioRequestBroker = null;
+const agentContextTokenLimit = Number.isSafeInteger(Number(process.env.AI_WORKSTATION_AGENT_CONTEXT_TOKENS))
+ ? Number(process.env.AI_WORKSTATION_AGENT_CONTEXT_TOKENS)
+ : config.unifiedAgentContextTokens;
+const maxAgentPromptTokens = Math.max(4_096, Math.floor(agentContextTokenLimit * 0.60));
 const truncationRetryFloor = 1_600;
 const truncationRetryCeiling = Math.max(
   truncationRetryFloor,
   Math.min(Number(process.env.AI_WORKSTATION_LM_MAX_OUTPUT_TOKENS) || 4_096, 8_192)
 );
+
+function estimateTextTokens(value) {
+ return Math.max(1, Math.ceil(JSON.stringify(value).length / 4));
+}
+
+function trimPromptToModelWindow(prompt, maxTokens = maxAgentPromptTokens) {
+ const serialized = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
+ if (!serialized) return serialized;
+ const estimated = estimateTextTokens(serialized);
+ if (estimated <= maxTokens) return serialized;
+ const targetCharacters = Math.max(1, Math.floor((maxTokens * 4) * 0.9));
+ return serialized.slice(0, targetCharacters);
+}
 
 function trackedRequestSignal(timeoutMs, externalSignal = null) {
   const controller = new AbortController();
@@ -137,7 +155,7 @@ export function buildMultiImageVisionRequest({
     ],
     temperature: 0,
     max_output_tokens: maxOutputTokens,
-    context_length: 8192,
+    context_length: agentContextTokenLimit,
     store: false,
     stream: false
   };
@@ -160,7 +178,7 @@ export function buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens 
     input: [{ type: 'text', content: normalizeTextPrompt(prompt, maxPromptLength) }],
     temperature: 0,
     max_output_tokens: maxOutputTokens,
-    context_length: 8192,
+    context_length: agentContextTokenLimit,
     store: false,
     stream: false
   };
@@ -669,7 +687,7 @@ export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOut
     formatError = null
   } = {}) {
     if (responseSchema !== AGENT_DECISION_SCHEMA) throw new TypeError('Unsupported agent decision schema.');
-    const prompt = JSON.stringify({
+    const prompt = trimPromptToModelWindow({
       context,
       ...(repair ? {
         formatRepair: {
@@ -677,9 +695,10 @@ export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOut
           instruction: 'Return one corrected decision using the same context.'
         }
       } : {})
-    });
+    }, maxAgentPromptTokens);
     const screenshotPath = context?.pinned?.lastToolResult?.result?.screenshotPath ||
       context?.pinned?.lastObservation?.screenshotPath || null;
+    const maxPromptLength = Math.min(100_000, Math.max(4_096, Math.floor(maxAgentPromptTokens * 4 * 0.9)));
     const result = screenshotPath
       ? await analyzeImageWithLmStudio({
         baseUrl,
@@ -688,7 +707,7 @@ export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOut
         prompt,
         systemPrompt,
         maxOutputTokens,
-        maxPromptLength: 100_000,
+        maxPromptLength,
         timeoutMs,
         signal,
         useBroker: false
@@ -699,7 +718,7 @@ export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOut
         prompt,
         systemPrompt,
         maxOutputTokens,
-        maxPromptLength: 100_000,
+        maxPromptLength,
         timeoutMs,
         signal,
         useBroker: false

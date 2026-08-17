@@ -9,6 +9,7 @@ import {
   UNIFIED_AGENT_SYSTEM_PROMPT,
   normalizeAgentDecision
 } from '../src/agent-model-protocol.mjs';
+import { config } from '../src/config.mjs';
 import { createLmStudioAgentClient } from '../src/lmstudio-client.mjs';
 
 test('decision protocol accepts one tool call or final result but no role switch', () => {
@@ -100,6 +101,39 @@ test('LM Studio adapter uses the unified strict schema for a full compiled conte
     assert.equal(request.model, 'test-model');
     assert.equal(request.response_format.json_schema.name, 'jarvis_agent_decision');
     assert.deepEqual(request.response_format.json_schema.schema, AGENT_DECISION_SCHEMA);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LM Studio adapter caps oversized agent prompts to the active context budget', async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (_url, options) => {
+    request = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          choices: [{ finish_reason: 'stop', message: { content: '{"type":"final","status":"completed","summary":"ok","evidence":[]}' } }]
+        };
+      }
+    };
+  };
+  try {
+    const client = createLmStudioAgentClient({ baseUrl: 'http://127.0.0.1:1234' });
+    const oversizedContext = {
+      pinned: { goal: 'x'.repeat(200_000) },
+      relevantMemory: Array.from({ length: 80 }, (_, index) => ({ text: 'memory '.repeat(400) + index })),
+      recentEvents: Array.from({ length: 50 }, (_, index) => ({ sequence: index + 1, type: 'diagnostic.note', payload: { text: 'y'.repeat(500) } }))
+    };
+    await client(oversizedContext, {
+      model: 'test-model', systemPrompt: UNIFIED_AGENT_SYSTEM_PROMPT, responseSchema: AGENT_DECISION_SCHEMA
+    });
+    const promptText = JSON.stringify(request.messages[1].content);
+    const tokenEstimate = Math.ceil(promptText.length / 4);
+    assert.ok(tokenEstimate <= Math.floor(config.unifiedAgentContextTokens * 0.60));
   } finally {
     globalThis.fetch = originalFetch;
   }

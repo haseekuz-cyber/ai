@@ -72,7 +72,7 @@ function Ensure-LmStudioModel {
     $lms = Join-Path $env:USERPROFILE '.lmstudio\bin\lms.exe'
     $model = if ($env:AI_WORKSTATION_LM_STUDIO_MODEL) { $env:AI_WORKSTATION_LM_STUDIO_MODEL } else { 'qwen/qwen3-vl-8b' }
     $modelKey = if ($env:AI_WORKSTATION_LM_STUDIO_MODEL_KEY) { $env:AI_WORKSTATION_LM_STUDIO_MODEL_KEY } else { $model }
-    $contextLength = if ($env:AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH) { $env:AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH } else { '8192' }
+    $contextLength = if ($env:AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH) { $env:AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH } else { '12288' }
     $gpuOffload = if ($env:AI_WORKSTATION_LM_STUDIO_GPU_OFFLOAD) { $env:AI_WORKSTATION_LM_STUDIO_GPU_OFFLOAD } else { 'max' }
     $parallel = if ($env:AI_WORKSTATION_LM_STUDIO_PARALLEL) { $env:AI_WORKSTATION_LM_STUDIO_PARALLEL } else { '1' }
     if (-not (Test-Path -LiteralPath $lms)) {
