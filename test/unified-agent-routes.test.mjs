@@ -56,3 +56,14 @@ test('frontend uses one AgentSession identity and canonical autonomous copy', as
   assert.match(html, />Автономный режим</);
   assert.doesNotMatch(html, />Анархичность</);
 });
+
+test('a stop the user asked for is reported as a stop, not as an agent failure', async () => {
+  const app = await fs.readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  // The server answers a cancelled turn with the session_cancelled code and the
+  // stop reason as the message, so the quiet branch must key off the code.
+  assert.match(app, /body\?\.error [!=]== 'session_cancelled'/);
+  const turn = app.match(/async function runUnifiedAgentTurn[\s\S]*?\n\}\n/);
+  assert.ok(turn, 'runUnifiedAgentTurn must stay one reviewable function');
+  assert.doesNotMatch(turn[0], /String\(error\.message\)\.includes\('session_replaced'\)/);
+  assert.match(turn[0], /cancelledTurnNotice\(error\)/);
+});

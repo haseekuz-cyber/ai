@@ -773,6 +773,16 @@ async function ensureAgentSession({ goal, mode, windowHandle = null }) {
   return currentAgentSessionId;
 }
 
+// Pressing «Стоп» or switching goals cancels the in-flight turn. The server
+// answers with the session_cancelled code and the stop reason as the message.
+// That is the user's own decision, so it must not be reported as a failure.
+function cancelledTurnNotice(error) {
+  if (error?.body?.error !== 'session_cancelled') return null;
+  return String(error.message || '').includes('session_replaced')
+    ? 'Предыдущая задача заменена новой; JARVIS продолжит по свежей цели.'
+    : 'Ход остановлен по вашей команде. Журнал сессии закрыт, ваши данные не изменены.';
+}
+
 function summarizeUnifiedTurn(turn) {
   if (turn.kind === 'final') return turn.decision?.summary || 'Задача завершена.';
   if (turn.kind === 'user_question') return turn.decision?.question || 'JARVIS просит уточнение.';
@@ -851,8 +861,9 @@ async function runUnifiedAgentTurn({ autonomous = false } = {}) {
       }, 350);
     }
   } catch (error) {
-    if (String(error.message).includes('session_replaced')) {
-      setStatus('Предыдущая задача заменена новой; JARVIS продолжит по свежей цели.');
+    const notice = cancelledTurnNotice(error);
+    if (notice) {
+      setStatus(notice);
     } else {
       setStatus(`JARVIS не смог продолжить: ${error.message}`, { error: true });
       reportJarvis('Ошибка', error.message);
