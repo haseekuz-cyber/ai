@@ -45,6 +45,18 @@ test('decision protocol is strict, detached and contains no agent roles', () => 
   );
 });
 
+test('the protocol never invents a tool, reason, summary or question for an unusable answer', () => {
+  assert.throws(() => normalizeAgentDecision({ type: 'tool_call', arguments: {}, reason: 'Inspect' }), /decision\.tool/);
+  assert.throws(() => normalizeAgentDecision({ type: 'tool_call', tool: '   ', arguments: {}, reason: 'Inspect' }), /decision\.tool/);
+  assert.throws(() => normalizeAgentDecision({ type: 'tool_call', tool: 'repo.search', arguments: {}, reason: '   ' }), /decision\.reason/);
+  assert.throws(() => normalizeAgentDecision({ type: 'final', status: 'completed', summary: '  ', evidence: [] }), /decision\.summary/);
+  assert.throws(() => normalizeAgentDecision({ type: 'user_question', question: '', reason: 'Need input' }), /decision\.question/);
+  for (const argumentsValue of [null, [], ' {} ']) {
+    const decision = normalizeAgentDecision({ type: 'tool_call', tool: 'repo.search', arguments: argumentsValue, reason: 'Inspect' });
+    assert.deepEqual(decision.arguments, {});
+  }
+});
+
 test('active model overrides every legacy role alias even when old variables conflict', async () => {
   const previous = { ...process.env };
   Object.assign(process.env, {

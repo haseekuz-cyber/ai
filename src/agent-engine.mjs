@@ -5,6 +5,10 @@ import {
   UNIFIED_AGENT_SYSTEM_PROMPT,
   normalizeAgentDecision
 } from './agent-model-protocol.mjs';
+import { canonicalJson } from './canonical-json.mjs';
+
+const REPEATED_DECISION_LIMIT = 3;
+const CONSECUTIVE_TOOL_FAILURE_LIMIT = 3;
 
 function requireDependency(value, method, name) {
   if (!value || typeof value[method] !== 'function') throw new TypeError(`${name} must expose ${method}().`);
@@ -21,6 +25,39 @@ function terminalResult(state) {
   if (state.status === 'cancelled') return { kind: 'cancelled', state };
   if (state.status === 'waiting_for_user') return { kind: 'user_question', state };
   return { kind: 'terminal', status: state.status, state };
+}
+
+function trailingIdenticalDecisions(events, fingerprint) {
+  let count = 0;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index].type !== 'model.decided') continue;
+    if (canonicalJson(events[index].payload?.decision ?? null) !== fingerprint) break;
+    count += 1;
+  }
+  return count;
+}
+
+function trailingToolFailures(events) {
+  const failures = [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index].type === 'tool.completed') break;
+    if (events[index].type === 'tool.failed') failures.push(events[index]);
+  }
+  return failures;
+}
+
+function noProgressReason(events, decision) {
+  if (decision.type !== 'tool_call') return null;
+  const repeats = trailingIdenticalDecisions(events, canonicalJson(decision)) + 1;
+  if (repeats >= REPEATED_DECISION_LIMIT) {
+    return `AgentSession stopped: the model repeated the same ${decision.tool} decision ${repeats} times without progress.`;
+  }
+  const failures = trailingToolFailures(events);
+  if (failures.length >= CONSECUTIVE_TOOL_FAILURE_LIMIT) {
+    const lastError = failures[0].payload?.error?.message || 'no error message was recorded';
+    return `AgentSession stopped after ${failures.length} consecutive tool failures; the last error was "${lastError}".`;
+  }
+  return null;
 }
 
 function modelToolManifest(manifest = {}) {
@@ -205,6 +242,16 @@ export class AgentEngine {
         causationId: requestId,
         payload: { decisionId, decision }
       });
+
+      const stallReason = noProgressReason(loaded.events, decision);
+      if (stallReason) {
+        const { state } = await this.sessionStore.append(sessionId, {
+          type: 'session.failed',
+          causationId: decisionId,
+          payload: { reason: stallReason, evidence: [] }
+        });
+        return { kind: 'terminal', status: 'failed', decisionId, decision, state };
+      }
 
       if (decision.type === 'tool_call') {
         controller.signal.throwIfAborted();

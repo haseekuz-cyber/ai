@@ -49,30 +49,84 @@ test('null or empty tool arguments are normalized into an empty object instead o
   }
 });
 
-test('empty tool names safely fall back to the read-only observation tool', async () => {
-  const fixture = await createAgentFixture({
-    modelClient: async () => ({ type: 'tool_call', tool: '', arguments: {}, reason: 'Inspect' })
-  });
-  fixture.toolRegistry.register({
-    name: 'ui.observe', risk: 'read_only', readOnly: true, idempotency: 'retryable',
-    inputSchema: { type: 'object', additionalProperties: false }
-  }, async () => ({ ok: true }));
-  const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
-  const result = await fixture.engine.next(session.sessionId);
-  assert.equal(result.kind, 'tool_result');
-  assert.equal(result.decision.tool, 'ui.observe');
-  assert.equal(result.decision.reason, 'Inspect');
-  assert.equal(result.results[0].status, 'completed');
+test('an unusable model decision triggers one format repair instead of a fabricated observation', async () => {
+  for (const [unusable, expectedError] of [
+    [{ type: 'tool_call', tool: '   ', arguments: {}, reason: 'Inspect' }, /decision\.tool/],
+    [{ type: 'tool_call', tool: 'test.read', arguments: {}, reason: '   ' }, /decision\.reason/]
+  ]) {
+    const calls = [];
+    let observations = 0;
+    const fixture = await createAgentFixture({
+      modelClient: async (_context, options) => {
+        calls.push(options);
+        return calls.length === 1
+          ? unusable
+          : { type: 'final', status: 'failed', summary: 'Модель не выбрала инструмент', evidence: [] };
+      }
+    });
+    fixture.toolRegistry.register({
+      name: 'ui.observe', risk: 'read_only', readOnly: true, idempotency: 'retryable',
+      inputSchema: { type: 'object', additionalProperties: false }
+    }, async () => {
+      observations += 1;
+      return { ok: true };
+    });
+    const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+    const result = await fixture.engine.next(session.sessionId);
+    assert.equal(result.kind, 'final');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].repair, true);
+    assert.match(calls[1].formatError, expectedError);
+    assert.equal(observations, 0);
+  }
 });
 
-test('empty reason text is normalized to a safe default instead of breaking the live mission flow', async () => {
-  const { engine } = await createAgentFixture({
-    modelClient: async () => ({ type: 'tool_call', tool: 'test.read', arguments: {}, reason: '   ' })
+test('a repeated identical decision stops the session instead of looping forever', async () => {
+  let executions = 0;
+  const fixture = await createAgentFixture({
+    modelClient: async () => ({ type: 'tool_call', tool: 'test.loop', arguments: {}, reason: 'Observe again' })
   });
-  const session = await engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
-  const result = await engine.next(session.sessionId);
-  assert.equal(result.kind, 'tool_result');
-  assert.equal(result.decision.reason, 'Proceed with the safest available action.');
+  fixture.toolRegistry.register({
+    name: 'test.loop', risk: 'read_only', readOnly: true, idempotency: 'retryable',
+    inputSchema: { type: 'object', additionalProperties: false }
+  }, async () => {
+    executions += 1;
+    return { ok: true };
+  });
+  const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+  assert.equal((await fixture.engine.next(session.sessionId)).kind, 'tool_result');
+  assert.equal((await fixture.engine.next(session.sessionId)).kind, 'tool_result');
+  const stalled = await fixture.engine.next(session.sessionId);
+  assert.equal(stalled.kind, 'terminal');
+  assert.equal(stalled.state.status, 'failed');
+  assert.match(stalled.state.terminalReason, /repeated the same test\.loop decision/i);
+  assert.equal(executions, 2);
+});
+
+test('repeated tool failures stop the session and keep the real tool error', async () => {
+  let attempts = 0;
+  const fixture = await createAgentFixture({
+    modelClient: async () => {
+      attempts += 1;
+      return { type: 'tool_call', tool: 'test.broken', arguments: {}, reason: `Attempt ${attempts}` };
+    }
+  });
+  fixture.toolRegistry.register({
+    name: 'test.broken', risk: 'read_only', readOnly: true, idempotency: 'retryable',
+    inputSchema: { type: 'object', additionalProperties: false }
+  }, async () => {
+    throw new Error('This session has no selected UI window.');
+  });
+  const session = await fixture.engine.start({ goal: 'Проверь', mode: 'guided', surface: isolatedSurface });
+  for (let turn = 0; turn < 3; turn += 1) {
+    const result = await fixture.engine.next(session.sessionId);
+    assert.equal(result.results[0].status, 'failed');
+  }
+  const stalled = await fixture.engine.next(session.sessionId);
+  assert.equal(stalled.kind, 'terminal');
+  assert.equal(stalled.state.status, 'failed');
+  assert.match(stalled.state.terminalReason, /3 consecutive tool failures/i);
+  assert.match(stalled.state.terminalReason, /no selected UI window/i);
 });
 
 test('invalid model format is repaired once by the same active model', async () => {

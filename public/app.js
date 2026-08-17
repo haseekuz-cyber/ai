@@ -785,7 +785,7 @@ function summarizeUnifiedTurn(turn) {
       ? `Выполнен инструмент ${result.tool}. Результат записан; следующий шаг будет принят по свежему состоянию.`
       : `Инструмент ${result?.tool || turn.decision?.tool || 'неизвестен'} не выполнен: ${result?.error?.message || 'нет результата'}`;
   }
-  return turn.state?.status || 'JARVIS обновил состояние задачи.';
+  return turn.state?.terminalReason || turn.state?.status || 'JARVIS обновил состояние задачи.';
 }
 
 async function runUnifiedAgentTurn({ autonomous = false } = {}) {
@@ -851,9 +851,13 @@ async function runUnifiedAgentTurn({ autonomous = false } = {}) {
       }, 350);
     }
   } catch (error) {
-    setStatus(`JARVIS не смог продолжить: ${error.message}`, { error: true });
-    reportJarvis('Ошибка', error.message);
-    if (autonomous) anarchyAwaitingCorrection = true;
+    if (String(error.message).includes('session_replaced')) {
+      setStatus('Предыдущая задача заменена новой; JARVIS продолжит по свежей цели.');
+    } else {
+      setStatus(`JARVIS не смог продолжить: ${error.message}`, { error: true });
+      reportJarvis('Ошибка', error.message);
+      if (autonomous) anarchyAwaitingCorrection = true;
+    }
   } finally {
     busy = false;
     updateControls();
