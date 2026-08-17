@@ -19,6 +19,7 @@ test('buildApprovedStep keeps a compact human-approved example', () => {
   assert.equal(record.kind, 'step_approved');
   assert.equal(record.step.humanApproved, true);
   assert.equal(record.application.processName, 'CorelDRW');
+  assert.equal(record.experience.state, 'training_approved');
   assert.deepEqual(record.step.visualEvidence, {
     schemaVersion: 1,
     beforeImagePath: 'before.png',
@@ -47,5 +48,6 @@ test('negative feedback is preserved as experience to avoid', () => {
   });
   assert.equal(record.rating, 'negative');
   assert.equal(record.step.humanApproved, false);
+  assert.equal(record.experience.state, 'interpreted');
   assert.match(ratedStepsForPrompt([record]), /не повторяй его без изменения/);
 });

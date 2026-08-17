@@ -259,8 +259,17 @@ def iter_feedback_records(path: Path) -> Iterable[dict[str, Any]]:
     return records
 
 
+def feedback_training_approved(record: dict[str, Any]) -> bool:
+    experience = record.get("experience")
+    if isinstance(experience, dict):
+        return experience.get("state") == "training_approved"
+    step = record.get("step") if isinstance(record.get("step"), dict) else {}
+    validation = step.get("automatedValidation") if isinstance(step.get("automatedValidation"), dict) else {}
+    return record.get("rating") == "positive" and step.get("humanApproved") is True and validation.get("success") is True
+
+
 def feedback_sample(record: dict[str, Any]) -> dict[str, Any] | None:
-    if record.get("rating") != "positive" or not isinstance(record.get("step"), dict):
+    if not feedback_training_approved(record) or not isinstance(record.get("step"), dict):
         return None
     step = record["step"]
     evidence = step.get("visualEvidence") if isinstance(step.get("visualEvidence"), dict) else {}
@@ -281,6 +290,7 @@ def feedback_sample(record: dict[str, Any]) -> dict[str, Any] | None:
             "stepIndex": record.get("stepIndex"),
             "createdAt": record.get("createdAt"),
             "humanApproved": True,
+            "experienceState": (record.get("experience") or {}).get("state", "legacy_verified"),
         },
     )
 
@@ -333,7 +343,7 @@ def build_dataset(
         positive_feedback += 1
         sample = feedback_sample(record)
         if sample is None:
-            rejected.append({"file": str(record.get("feedbackId") or "feedback"), "reason": "positive_feedback_missing_visual_evidence"})
+            rejected.append({"file": str(record.get("feedbackId") or "feedback"), "reason": "positive_feedback_not_training_approved_or_missing_visual_evidence"})
         else:
             samples.append(sample)
 

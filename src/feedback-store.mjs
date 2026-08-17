@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { normalizeExperienceTransition, promoteExperience } from './experience-schema.mjs';
 
 function cleanText(value, maxLength = 1_000) {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
@@ -49,6 +50,36 @@ export function buildStepFeedback({
 }) {
   const normalizedRating = normalizeRating(rating);
   if (!feedbackId || !action?.type) throw new TypeError('Feedback data is incomplete.');
+  const normalizedVisualEvidence = normalizeVisualEvidence(visualEvidence);
+  let experience = normalizeExperienceTransition({
+    episodeId: feedbackId,
+    state: 'raw',
+    goal: cleanText(instruction, 4_000),
+    application: {
+      processName: cleanText(application?.processName, 128),
+      className: cleanText(application?.className, 128)
+    },
+    before: normalizedVisualEvidence ? {
+      imagePath: normalizedVisualEvidence.beforeImagePath,
+      sha256: normalizedVisualEvidence.beforeSha256
+    } : null,
+    action,
+    modifiers: action.modifiers,
+    trajectory: action.trajectory,
+    trajectoryImportance: action.trajectoryMode,
+    after: normalizedVisualEvidence ? {
+      imagePath: normalizedVisualEvidence.afterImagePath,
+      sha256: normalizedVisualEvidence.afterSha256
+    } : null,
+    expectedResult,
+    validation: automatedValidation,
+    humanFeedback: normalizedRating
+  });
+  experience = promoteExperience(experience, 'interpreted', { source: 'executed_step_feedback' });
+  if (normalizedRating === 'positive' && automatedValidation?.success === true) {
+    experience = promoteExperience(experience, 'verified', { validationSuccess: true });
+    experience = promoteExperience(experience, 'training_approved', { humanApproved: true });
+  }
   return {
     schemaVersion: 2,
     feedbackId,
@@ -72,8 +103,9 @@ export function buildStepFeedback({
       humanApproved: normalizedRating === 'positive',
       humanRating: normalizedRating,
       automatedValidation,
-      visualEvidence: normalizeVisualEvidence(visualEvidence)
-    }
+      visualEvidence: normalizedVisualEvidence
+    },
+    experience
   };
 }
 

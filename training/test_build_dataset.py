@@ -50,10 +50,13 @@ class BuildDatasetTests(unittest.TestCase):
                 {
                     "feedbackId": "positive-1",
                     "rating": "positive",
+                    "experience": {"state": "training_approved"},
                     "instruction": "Select the tool",
                     "application": {"processName": "DesignApp", "className": "DesignWindow"},
                     "step": {
                         "action": {"type": "click", "point": {"x": 0.1, "y": 0.2}},
+                        "automatedValidation": {"success": True},
+                        "humanApproved": True,
                         "visualEvidence": {"beforeImagePath": str(before), "afterImagePath": str(middle)},
                     },
                 },
