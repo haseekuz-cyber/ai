@@ -96,6 +96,30 @@ test('the protocol never invents a tool, reason, summary or question for an unus
   }
 });
 
+test('the decision schema forces complete decisions on a backend that ignores oneOf', () => {
+  // Proven live: LM Studio and Ollama enforce top-level `required` and `enum` but not
+  // `oneOf` branch requirements, so an oneOf-only schema lets the model answer with a
+  // bare discriminator like {"type":"final"} and the turn fails on missing fields.
+  // Every field any branch needs must be required at the top level so the grammar
+  // forces a complete object; normalizeAgentDecision keeps the per-type validation.
+  assert.equal(AGENT_DECISION_SCHEMA.oneOf, undefined);
+  assert.equal(AGENT_DECISION_SCHEMA.additionalProperties, false);
+  for (const field of ['type', 'tool', 'arguments', 'reason', 'status', 'summary', 'evidence', 'question']) {
+    assert.ok(AGENT_DECISION_SCHEMA.required.includes(field), `schema must require ${field}`);
+  }
+});
+
+test('a flat-schema tool_call carrying the forced final and question fields is normalized, not rejected', () => {
+  // The flat schema makes the model emit every field, so a real tool_call now arrives
+  // with status/summary/evidence/question attached. They are dropped, never rejected,
+  // and never reach durable state — only tool/arguments/reason survive.
+  const decision = normalizeAgentDecision({
+    type: 'tool_call', tool: 'ui.observe', arguments: { window_id: 'w1' }, reason: 'Осмотреть окно',
+    status: 'completed', summary: 'скриншот сделан', evidence: ['скриншот сделан'], question: ''
+  });
+  assert.deepEqual(decision, { type: 'tool_call', tool: 'ui.observe', arguments: { window_id: 'w1' }, reason: 'Осмотреть окно' });
+});
+
 test('active model overrides every legacy role alias even when old variables conflict', async () => {
   const previous = { ...process.env };
   Object.assign(process.env, {

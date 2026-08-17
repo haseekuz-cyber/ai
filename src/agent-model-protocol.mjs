@@ -11,6 +11,13 @@ const DECISION_FIELDS = new Set([
 
 const stringSchema = { type: 'string' };
 
+// Every branch field is required at the top level, and there is no `oneOf`. A local
+// GBNF grammar (LM Studio, Ollama) enforces top-level `required` and `enum` but ignores
+// `oneOf` branch requirements — proven live, where an oneOf schema let the model answer
+// with a bare {"type":"final"} and the turn failed on the missing fields. Forcing the
+// full field set makes the grammar emit a complete object for every decision type;
+// normalizeAgentDecision keeps the strict per-type validation and drops the fields the
+// chosen type does not use, so a tool_call never carries a fabricated summary downstream.
 export const AGENT_DECISION_SCHEMA = Object.freeze({
   type: 'object',
   properties: {
@@ -23,22 +30,8 @@ export const AGENT_DECISION_SCHEMA = Object.freeze({
     evidence: { type: 'array', items: stringSchema },
     question: stringSchema
   },
-  required: ['type'],
-  additionalProperties: false,
-  oneOf: [
-    {
-      properties: { type: { type: 'string', enum: ['tool_call'] } },
-      required: ['type', 'tool', 'arguments', 'reason']
-    },
-    {
-      properties: { type: { type: 'string', enum: ['final'] } },
-      required: ['type', 'status', 'summary', 'evidence']
-    },
-    {
-      properties: { type: { type: 'string', enum: ['user_question'] } },
-      required: ['type', 'question', 'reason']
-    }
-  ]
+  required: ['type', 'tool', 'arguments', 'reason', 'status', 'summary', 'evidence', 'question'],
+  additionalProperties: false
 });
 
 export const UNIFIED_AGENT_SYSTEM_PROMPT = `You are JARVIS, the single decision-making model for a local Windows agent.
@@ -46,6 +39,7 @@ Use only the supplied AgentSession context. Preserve its goal, corrections, surf
 Choose exactly one next decision: call one declared tool, return a final result, or ask the user one necessary question.
 Never invent a tool, tool result, observation, permission or completed effect. Never assign work to another role.
 The program owns identifiers, policy, execution, validation and durable state. You only choose the next decision.
+The schema lists every field; populate the ones your chosen type needs and send empty values ("", [], {}) for the rest.
 Return JSON matching the supplied strict schema, with no markdown or extra fields.`;
 
 function cloneAndFreeze(value) {
