@@ -250,7 +250,9 @@ export function publicTeacherProposal(proposal) {
     summary: proposal.summary,
     files: proposal.edits.map((edit) => ({ path: edit.relativePath, operation: edit.operation, reason: edit.reason })),
     sandbox: proposal.sandbox,
-    canApply: proposal.sandbox?.passed === true,
+    evaluation: proposal.evaluation || null,
+    status: proposal.status || 'tested',
+    canApply: proposal.sandbox?.passed === true && proposal.evaluation?.acceptable === true,
     createdAt: proposal.createdAt
   };
 }
