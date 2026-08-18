@@ -8,6 +8,7 @@ import {
   extractSearchResults,
   htmlToText,
   isPrivateAddress,
+  retrieveLearningMaterials,
   saveLearningMaterial,
   validatePublicHttpsUrl,
   youtubeVideoId
@@ -41,6 +42,26 @@ test('learning materials are stored separately and deduplicated by URL', async (
   assert.equal(first.saved, true);
   assert.equal(second.saved, false);
   assert.equal((await fs.readFile(filePath, 'utf8')).trim().split(/\r?\n/).length, 1);
+});
+
+test('saved program knowledge is retrieved for later Worker planning', async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-rag-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'materials.jsonl');
+  await saveLearningMaterial(filePath, {
+    sourceType: 'web', title: 'CorelDRAW ellipse tool', url: 'https://example.com/corel-ellipse',
+    excerpt: 'Hold Control while dragging to constrain an ellipse to a perfect circle.',
+    application: { processName: 'CorelDRW' }
+  });
+  await saveLearningMaterial(filePath, {
+    sourceType: 'web', title: 'Telegram messages', url: 'https://example.com/telegram', excerpt: 'Send a message.'
+  });
+  const results = await retrieveLearningMaterials(filePath, {
+    processName: 'CorelDRW', query: 'нарисовать ellipse circle Control', limit: 2
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].title, 'CorelDRAW ellipse tool');
+  assert.ok(results[0].score >= 4);
 });
 
 test('teacher internet extracts only HTTPS search results and strips active markup', () => {

@@ -33,6 +33,35 @@ function normalizeTrajectory(value) {
   return value.map((point, index) => normalizePoint(point, `trajectory[${index}]`));
 }
 
+function normalizeExecutionSurface(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('executionSurface must be an object.');
+  if (typeof value.id !== 'string' || !value.id) throw new TypeError('executionSurface.id is required.');
+  if (!['shared', 'isolated'].includes(value.mode)) throw new TypeError('executionSurface.mode must be shared or isolated.');
+  return { id: value.id, mode: value.mode };
+}
+
+function normalizeInputLease(value, surface) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('inputLease is required for shared input.');
+  if (typeof value.leaseId !== 'string' || !value.leaseId) throw new TypeError('inputLease.leaseId is required.');
+  if (value.surfaceId !== surface.id) throw new TypeError('inputLease must match executionSurface.id.');
+  if (!['string', 'number'].includes(typeof value.userActivitySequence)) throw new TypeError('inputLease.userActivitySequence is required.');
+  const issuedAtMs = finiteNumber(value.issuedAtMs, 'inputLease.issuedAtMs');
+  const expiresAtMs = finiteNumber(value.expiresAtMs, 'inputLease.expiresAtMs');
+  if (expiresAtMs <= issuedAtMs) throw new TypeError('inputLease expiration must be after issuance.');
+  const lastInputTick = finiteNumber(value.lastInputTick, 'inputLease.lastInputTick');
+  const focusedWindowHandle = finiteNumber(value.focusedWindowHandle, 'inputLease.focusedWindowHandle');
+  return {
+    leaseId: value.leaseId,
+    surfaceId: value.surfaceId,
+    userActivitySequence: value.userActivitySequence,
+    issuedAtMs,
+    expiresAtMs,
+    lastInputTick,
+    cursor: normalizePoint(value.cursor, 'inputLease.cursor'),
+    focusedWindowHandle
+  };
+}
+
 export function normalizePointerAction(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new TypeError('Pointer action must be an object.');
@@ -126,7 +155,7 @@ export function fitPointerActionToAllowedBounds(action, allowedBounds) {
   return { action: fitted, boundaryAdjusted };
 }
 
-export function createBoundedPointerRequest({ action, allowedBounds, forbiddenProcessNames }) {
+export function createBoundedPointerRequest({ action, allowedBounds, forbiddenProcessNames, executionSurface, inputLease }) {
   if (!allowedBounds || !Number.isFinite(allowedBounds.x) || !Number.isFinite(allowedBounds.y) ||
       !Number.isFinite(allowedBounds.width) || !Number.isFinite(allowedBounds.height) ||
       allowedBounds.width <= 0 || allowedBounds.height <= 0) {
@@ -134,11 +163,15 @@ export function createBoundedPointerRequest({ action, allowedBounds, forbiddenPr
   }
   const normalizedAction = normalizePointerAction(action);
   const fitted = fitPointerActionToAllowedBounds(normalizedAction, allowedBounds);
+  const surface = executionSurface == null ? null : normalizeExecutionSurface(executionSurface);
+  const lease = surface?.mode === 'shared' ? normalizeInputLease(inputLease, surface) : null;
   const normalized = {
     ...fitted.action,
     allowedBounds,
     forbiddenProcessNames: [...forbiddenProcessNames],
-    boundaryAdjusted: fitted.boundaryAdjusted
+    boundaryAdjusted: fitted.boundaryAdjusted,
+    ...(surface ? { executionSurface: surface } : {}),
+    ...(lease ? { inputLease: lease } : {})
   };
   return normalized;
 }

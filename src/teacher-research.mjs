@@ -202,6 +202,44 @@ export async function saveLearningMaterial(filePath, material) {
   return { saved: true, material: stored };
 }
 
+export async function readLearningMaterials(filePath, { limit = 500 } = {}) {
+  try {
+    return (await fs.readFile(filePath, 'utf8')).split(/\r?\n/).filter(Boolean)
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean).slice(-Math.max(1, Math.min(Number(limit) || 500, 2_000)));
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+function retrievalTokens(value) {
+  return [...new Set(String(value || '').toLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) || [])];
+}
+
+export async function retrieveLearningMaterials(filePath, { query = '', processName = '', limit = 4 } = {}) {
+  const queryTokens = retrievalTokens(`${processName} ${query}`);
+  if (!queryTokens.length) return [];
+  const process = String(processName || '').toLowerCase();
+  return (await readLearningMaterials(filePath)).map((material) => {
+    const haystack = `${material.title || ''} ${material.excerpt || ''} ${material.url || ''} ${material.application?.processName || ''}`.toLowerCase();
+    const tokenMatches = queryTokens.filter((token) => haystack.includes(token)).length;
+    const applicationMatch = process && String(material.application?.processName || '').toLowerCase() === process ? 3 : 0;
+    return { material, score: tokenMatches + applicationMatch };
+  }).filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || String(right.material.savedAt || '').localeCompare(String(left.material.savedAt || '')))
+    .slice(0, Math.max(1, Math.min(Number(limit) || 4, 8)))
+    .map(({ material, score }) => ({
+      materialId: material.materialId,
+      title: material.title,
+      url: material.url,
+      sourceType: material.sourceType,
+      excerpt: clean(material.excerpt, 1_200),
+      application: material.application || null,
+      score
+    }));
+}
+
 export async function researchPublicWeb(query, { limit = 3 } = {}) {
   const safeQuery = clean(query, 300);
   if (!safeQuery) return [];

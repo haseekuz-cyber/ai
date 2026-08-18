@@ -2,6 +2,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+const activeModel = process.env.AI_WORKSTATION_ACTIVE_MODEL ||
+  process.env.AI_WORKSTATION_LM_STUDIO_MODEL ||
+  'qwen/qwen3-vl-8b';
 
 function readPort(name, fallback) {
   const raw = process.env[name];
@@ -49,6 +52,9 @@ export const config = Object.freeze({
   virtualPointerScript: path.resolve(moduleDirectory, '..', 'scripts', 'virtual-pointer.ps1'),
   teachingRecorderScript: path.resolve(moduleDirectory, '..', 'scripts', 'teach-recorder.ps1'),
   safetyHotkeyScript: path.resolve(moduleDirectory, '..', 'scripts', 'safety-hotkey.ps1'),
+  userActivityScript: path.resolve(moduleDirectory, '..', 'scripts', 'user-activity.ps1'),
+  agentSessionsDirectory: process.env.AI_WORKSTATION_AGENT_SESSIONS || path.resolve(moduleDirectory, '..', 'artifacts', 'sessions'),
+  unifiedAgentBenchmarkReportPath: process.env.AI_WORKSTATION_AGENT_BENCHMARK_REPORT || 'D:\\AI-Work\\Agent-Data\\Evaluations\\UnifiedModel\\latest-report.json',
   observationsDirectory: process.env.AI_WORKSTATION_OBSERVATIONS || path.resolve(moduleDirectory, '..', 'artifacts', 'observations'),
   teachingDirectory: process.env.AI_WORKSTATION_TEACHING || path.resolve(moduleDirectory, '..', 'artifacts', 'teaching'),
   skillsDirectory: process.env.AI_WORKSTATION_SKILLS || path.resolve(moduleDirectory, '..', 'artifacts', 'skills'),
@@ -62,6 +68,9 @@ export const config = Object.freeze({
   teacherChatDirectory: process.env.AI_WORKSTATION_TEACHER_CHAT || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-chat'),
   teacherSandboxDirectory: process.env.AI_WORKSTATION_TEACHER_SANDBOX || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-sandbox'),
   teacherBackupDirectory: process.env.AI_WORKSTATION_TEACHER_BACKUPS || path.resolve(moduleDirectory, '..', 'artifacts', 'teacher-backups'),
+  errorPacketsDirectory: process.env.AI_WORKSTATION_ERROR_PACKETS || path.resolve(moduleDirectory, '..', 'artifacts', 'self-improvement', 'errors'),
+  improvementDirectory: process.env.AI_WORKSTATION_IMPROVEMENTS || path.resolve(moduleDirectory, '..', 'artifacts', 'self-improvement', 'candidates'),
+  evaluationDirectory: process.env.AI_WORKSTATION_EVALUATIONS || path.resolve(moduleDirectory, '..', 'artifacts', 'evaluations'),
   safetyStatePath: process.env.AI_WORKSTATION_SAFETY_STATE || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety.json'),
   safetyHotkeyReadyPath: process.env.AI_WORKSTATION_SAFETY_HOTKEY_READY || path.resolve(moduleDirectory, '..', 'artifacts', 'state', 'safety-hotkey.ready'),
   assignedDisplay: process.env.AI_WORKSTATION_DISPLAY || null,
@@ -69,12 +78,23 @@ export const config = Object.freeze({
   pointerOverlayEnabled: readBoolean('AI_WORKSTATION_POINTER_OVERLAY_ENABLED', true),
   pointerStatePath: process.env.AI_WORKSTATION_POINTER_STATE || path.resolve(moduleDirectory, '..', 'artifacts', 'virtual-pointer.json'),
   lmStudioBaseUrl: process.env.AI_WORKSTATION_LM_STUDIO_URL || 'http://127.0.0.1:1234',
-  lmStudioModel: process.env.AI_WORKSTATION_LM_STUDIO_MODEL || 'qwen/qwen3-vl-8b',
-  teacherModel: process.env.AI_WORKSTATION_TEACHER_MODEL || process.env.AI_WORKSTATION_LM_STUDIO_MODEL || 'qwen/qwen3-vl-8b',
+  activeModel,
+  lmStudioModel: activeModel,
+  visionModel: activeModel,
+  plannerModel: activeModel,
+  criticModel: activeModel,
+  coderModel: activeModel,
+  embeddingModel: process.env.AI_WORKSTATION_EMBEDDING_MODEL || 'qwen/qwen3-embedding-0.6b',
+  teacherModel: activeModel,
+  modelBrokerEnabled: readBoolean('AI_WORKSTATION_MODEL_BROKER', true),
+  modelIdleTtlMs: readInteger('AI_WORKSTATION_MODEL_IDLE_TTL_MS', 120_000, { minimum: 10_000, maximum: 3_600_000 }),
   teacherFastPathEnabled: readBoolean('AI_WORKSTATION_TEACHER_FAST_PATH', true),
   miniPlansEnabled: readBoolean('AI_WORKSTATION_MINI_PLANS', true),
   eventObserverEnabled: readBoolean('AI_WORKSTATION_EVENT_OBSERVER', true),
   eventObserverIntervalMs: readInteger('AI_WORKSTATION_EVENT_INTERVAL_MS', 1_200, { minimum: 250, maximum: 5_000 }),
   eventObserverActiveIntervalMs: readInteger('AI_WORKSTATION_EVENT_ACTIVE_INTERVAL_MS', 200, { minimum: 100, maximum: 1_000 }),
-  visionEnabled: readBoolean('AI_WORKSTATION_VISION_ENABLED', true)
+  visionEnabled: readBoolean('AI_WORKSTATION_VISION_ENABLED', true),
+  unifiedAgentContextTokens: readInteger('AI_WORKSTATION_AGENT_CONTEXT_TOKENS', 12_288, { minimum: 4_096, maximum: 131_072 }),
+  unifiedAgentEnabled: readBoolean('AI_WORKSTATION_UNIFIED_AGENT', true),
+  unifiedAgentMutationsRequested: readBoolean('AI_WORKSTATION_AGENT_MUTATIONS', false)
 });

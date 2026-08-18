@@ -72,6 +72,8 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .quiet.resume { border-color: #286447; color: #7ce3ad; }
 .quiet.anarchy { border-color: #5d4a22; color: #f3c86d; }
 .quiet.anarchy.active { border-color: #a86b2e; color: #fff0bd; background: #392817; }
+.quiet.programmer { border-color: #5056a6; color: #c8caff; background: #20234b; }
+.quiet.programmer:hover { border-color: #7b82ff; color: #fff; }
 
 .composer, .step-card, .feedback-card, .correction-card, .demo-panel, .teacher-chat, .teacher-panel, .principles-panel {
   border: 1px solid #242936;
@@ -210,9 +212,10 @@ textarea::placeholder { color: #666e81; }
 .key-placeholder { color: #656d80; padding-left: 0; }
 
 .teacher-chat { margin-top: 16px; overflow: hidden; }
-.teacher-chat-heading { padding: 18px 20px 12px; }
+.teacher-chat-heading { display: flex; align-items: start; justify-content: space-between; gap: 14px; padding: 18px 20px 12px; }
 .teacher-chat-heading > div { display: grid; gap: 3px; }
 .teacher-chat-heading span { color: #8790a4; font-size: 13px; }
+.teacher-chat-heading .programmer-badge { flex: 0 0 auto; border: 1px solid #3c4269; border-radius: 999px; padding: 6px 9px; color: #b8bcff; background: #191c36; font-size: 11px; white-space: nowrap; }
 .teacher-messages { display: grid; gap: 9px; max-height: 320px; overflow: auto; padding: 0 20px 14px; }
 .teacher-message { max-width: 88%; padding: 11px 13px; border: 1px solid #292f3e; border-radius: 14px; background: #11151d; }
 .teacher-message.user { justify-self: end; border-color: #4d4f91; background: #21234a; }
@@ -293,6 +296,7 @@ textarea::placeholder { color: #666e81; }
   .correction-actions .primary, .correction-actions .demo-button, .correction-actions .quiet { width: 100%; }
   .observation-actions button { width: 100%; }
   .teacher-chat-actions { align-items: stretch; flex-direction: column; }
+  .teacher-chat-heading { flex-direction: column; }
   .teacher-mode-row { align-items: stretch; flex-direction: column; }
   .teacher-chat-actions .primary, .attachment-button { width: 100%; margin: 0; text-align: center; }
 }

@@ -15,6 +15,7 @@ public static class AiPointerBridgeNative
 {
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hWnd, ref POINT point);
@@ -22,8 +23,60 @@ public static class AiPointerBridgeNative
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint message, UIntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 }
 '@
+
+function Throw-BridgeError {
+    param([string]$Code, [string]$Message)
+    $exception = [InvalidOperationException]::new($Message)
+    $exception.Data['BridgeCode'] = $Code
+    throw $exception
+}
+
+function Get-CurrentUserActivity {
+    $lastInput = [AiPointerBridgeNative+LASTINPUTINFO]::new()
+    $lastInput.cbSize = [uint32][Runtime.InteropServices.Marshal]::SizeOf($lastInput)
+    if (-not [AiPointerBridgeNative]::GetLastInputInfo([ref]$lastInput)) {
+        Throw-BridgeError 'input_activity_unavailable' 'GetLastInputInfo failed.'
+    }
+    $cursor = [AiPointerBridgeNative+POINT]::new()
+    if (-not [AiPointerBridgeNative]::GetCursorPos([ref]$cursor)) {
+        Throw-BridgeError 'input_activity_unavailable' 'GetCursorPos failed.'
+    }
+    return [ordered]@{
+        lastInputTick = [uint64]$lastInput.dwTime
+        cursorX = [int]$cursor.X
+        cursorY = [int]$cursor.Y
+        focusedWindowHandle = [long][AiPointerBridgeNative]::GetForegroundWindow()
+    }
+}
+
+function Assert-InputLease {
+    param($Request, [string]$ActivityFailureCode)
+    if ($null -eq $Request.executionSurface -or [string]$Request.executionSurface.mode -ne 'shared') { return }
+    if ($null -eq $Request.inputLease) {
+        Throw-BridgeError 'input_lease_required' 'A shared execution surface requires inputLease.'
+    }
+    if ([string]$Request.inputLease.surfaceId -ne [string]$Request.executionSurface.id) {
+        Throw-BridgeError 'input_lease_wrong_surface' 'The input lease belongs to another execution surface.'
+    }
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ($nowMs -gt [long]$Request.inputLease.expiresAtMs) {
+        Throw-BridgeError 'input_lease_expired' 'The input lease expired before dispatch.'
+    }
+    $activity = Get-CurrentUserActivity
+    $activityChanged =
+        [uint64]$Request.inputLease.lastInputTick -ne [uint64]$activity.lastInputTick -or
+        [int]$Request.inputLease.cursor.x -ne [int]$activity.cursorX -or
+        [int]$Request.inputLease.cursor.y -ne [int]$activity.cursorY -or
+        [long]$Request.inputLease.focusedWindowHandle -ne [long]$activity.focusedWindowHandle
+    if ($activityChanged) {
+        Throw-BridgeError $ActivityFailureCode 'User activity changed after the input lease was issued.'
+    }
+}
 
 function Test-PointInside {
     param($Point, $Bounds)
@@ -47,14 +100,24 @@ function Pack-Point {
 }
 
 function Get-InputHandle {
-    param([IntPtr]$TargetHandle, $Point)
+    param([IntPtr]$TargetHandle, [uint32]$ExpectedProcessId, $Point)
     $screenPoint = [AiPointerBridgeNative+POINT]::new()
     $screenPoint.X = [int]$Point.x
     $screenPoint.Y = [int]$Point.y
     $hitHandle = [AiPointerBridgeNative]::WindowFromPoint($screenPoint)
     if ($hitHandle -eq [IntPtr]::Zero) { throw 'No visible window exists at the pointer point.' }
     $rootHandle = [AiPointerBridgeNative]::GetAncestor($hitHandle, 2)
-    if ($rootHandle -ne $TargetHandle) { throw 'The target window is obscured at the pointer point.' }
+    if ($rootHandle -ne $TargetHandle) {
+        # Native applications commonly open dialogs as a second top-level
+        # window owned by the same process. Treat that modal surface as part
+        # of the selected application; a different process still fails
+        # closed as a real obstruction.
+        [uint32]$hitProcessId = 0
+        [void][AiPointerBridgeNative]::GetWindowThreadProcessId($rootHandle, [ref]$hitProcessId)
+        if ($hitProcessId -ne $ExpectedProcessId) {
+            throw "The target window is obscured at the pointer point by process $hitProcessId."
+        }
+    }
     return $hitHandle
 }
 
@@ -181,6 +244,7 @@ try {
     $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($RequestBase64))
     $request = $json | ConvertFrom-Json
     if ($request.confirmed -ne $true) { throw 'confirmed=true is required.' }
+    Assert-InputLease $request 'user_activity_before_action'
     $handle = [IntPtr]::new([long]$request.windowHandle)
     if (-not [AiPointerBridgeNative]::IsWindow($handle)) { throw 'Target window no longer exists.' }
 
@@ -230,11 +294,12 @@ try {
     }
     else {
         $inputPoint = if ($request.action -eq 'drag') { $request.from } else { $request.point }
-        $inputHandle = Get-InputHandle $handle $inputPoint
+        $inputHandle = Get-InputHandle $handle $processId $inputPoint
     }
 
     $cursorBefore = [Windows.Forms.Cursor]::Position
     $transport = $null
+    Assert-InputLease $request 'user_activity_before_action'
     switch ([string]$request.action) {
         'click' {
             if ([string]$request.button -eq 'left') {
@@ -316,6 +381,7 @@ try {
             }
             try {
                 foreach ($modifier in $modifierSpecs) {
+                    Assert-InputLease $request 'user_activity_during_action'
                     if (-not [AiPointerBridgeNative]::PostMessage(
                         $inputHandle,
                         [uint32]$modifier.Down,
@@ -325,9 +391,11 @@ try {
                     $pressedModifiers += $modifier
                 }
 
+                Assert-InputLease $request 'user_activity_during_action'
                 if (-not [AiPointerBridgeNative]::PostMessage($inputHandle, 0x0200, [UIntPtr]::new($modifierState), (Pack-Point $from))) {
                     throw 'Could not move the window-local pointer to the drag start.'
                 }
+                Assert-InputLease $request 'user_activity_during_action'
                 if (-not [AiPointerBridgeNative]::PostMessage(
                     $inputHandle,
                     $downMessage,
@@ -338,6 +406,7 @@ try {
 
                 $pathDelay = [math]::Max(1, [math]::Floor([int]$request.durationMs / [math]::Max(1, $pathPoints.Count)))
                 foreach ($point in $pathPoints) {
+                    Assert-InputLease $request 'user_activity_during_action'
                     if (-not [AiPointerBridgeNative]::PostMessage(
                         $inputHandle,
                         0x0200,
@@ -348,6 +417,7 @@ try {
                     Start-Sleep -Milliseconds $pathDelay
                 }
 
+                Assert-InputLease $request 'user_activity_during_action'
                 if (-not [AiPointerBridgeNative]::PostMessage(
                     $inputHandle,
                     $upMessage,
@@ -381,12 +451,15 @@ try {
             $transport = Set-AccessibleValue $processId $request.point ([string]$request.text)
             if ($null -eq $transport) {
                 $fieldPoint = Convert-ClientPoint $inputHandle $request.point
+                Assert-InputLease $request 'user_activity_during_action'
                 Send-Click $inputHandle $fieldPoint 'left'
                 Start-Sleep -Milliseconds 80
                 if ([string]$request.textMode -ne 'insert') {
+                    Assert-InputLease $request 'user_activity_during_action'
                     [void](Send-SafeKey $inputHandle 'Ctrl+A')
                 }
                 foreach ($character in ([string]$request.text).ToCharArray()) {
+                    Assert-InputLease $request 'user_activity_during_action'
                     [void][AiPointerBridgeNative]::PostMessage($inputHandle, 0x0102, [UIntPtr]::new([uint64][int]$character), [IntPtr]::Zero)
                 }
                 $transport = [ordered]@{ transport = 'window-message'; pattern = 'focus-selectAll-char'; element = $null }
@@ -418,7 +491,8 @@ try {
     }
 }
 catch {
-    $response = [ordered]@{ ok = $false; error = 'pointer_bridge_error'; message = [string]$_.Exception.Message }
+    $bridgeCode = if ($_.Exception.Data.Contains('BridgeCode')) { [string]$_.Exception.Data['BridgeCode'] } else { 'pointer_bridge_error' }
+    $response = [ordered]@{ ok = $false; error = $bridgeCode; message = [string]$_.Exception.Message }
 }
 
 $response | ConvertTo-Json -Depth 8 -Compress

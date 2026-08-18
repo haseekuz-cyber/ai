@@ -18,6 +18,7 @@ const statusText = $('#status-text');
 const safetyToggle = $('#safety-toggle');
 const fullShutdownButton = $('#full-shutdown-button');
 const anarchyButton = $('#anarchy-button');
+const programmerButton = $('#programmer-button');
 const windowSelect = $('#window-select');
 const taskInput = $('#task-input');
 const taskButton = $('#task-button');
@@ -67,17 +68,24 @@ const teacherMessage = $('#teacher-message');
 const teacherScreenshot = $('#teacher-screenshot');
 const teacherAttachment = $('#teacher-attachment');
 const teacherSend = $('#teacher-send');
+const teacherFixLast = $('#teacher-fix-last');
 const teacherProposal = $('#teacher-proposal');
 const teacherProposalSummary = $('#teacher-proposal-summary');
 const teacherProposalFiles = $('#teacher-proposal-files');
 const teacherProposalTests = $('#teacher-proposal-tests');
 const teacherApply = $('#teacher-apply');
+const teacherRollback = $('#teacher-rollback');
 const teacherTask = $('#teacher-task');
 const teacherTaskText = $('#teacher-task-text');
 const teacherTaskCriteria = $('#teacher-task-criteria');
 const teacherTaskRun = $('#teacher-task-run');
 
 let selectedWindowHandle = null;
+let currentAgentSessionId = null;
+let currentAgentSessionMode = null;
+let currentAgentSessionGoal = null;
+let currentAgentAwaitingUser = false;
+let currentAgentPendingApproval = null;
 let currentMission = null;
 let currentPlan = null;
 let completedStep = null;
@@ -322,10 +330,14 @@ function showTeacherProposal(proposal) {
     item.textContent = `${file.operation === 'create' ? 'Создать' : 'Изменить'} ${file.path}${file.reason ? ` — ${file.reason}` : ''}`;
     teacherProposalFiles.append(item);
   }
-  teacherProposalTests.textContent = proposal.sandbox?.passed
-    ? 'Проверка в отдельной копии: все тесты прошли.'
-    : `Проверка в отдельной копии не прошла. Код применить нельзя.${proposal.sandbox?.output ? ` ${proposal.sandbox.output.slice(-500)}` : ''}`;
+  const baseline = proposal.evaluation?.baseline;
+  const candidate = proposal.evaluation?.candidate;
+  teacherProposalTests.textContent = proposal.evaluation?.acceptable
+    ? `Исходная версия: ${baseline?.pass ?? '?'} тестов прошло. Кандидат: ${candidate?.pass ?? '?'} прошло, ${candidate?.fail ?? 0} ошибок. Регрессий не найдено; рабочий код ещё не изменён.`
+    : `Кандидат заблокирован: ${(proposal.evaluation?.reasons || ['тесты не пройдены']).join(', ')}.${proposal.sandbox?.output ? ` ${proposal.sandbox.output.slice(-500)}` : ''}`;
   teacherApply.disabled = !proposal.canApply;
+  teacherApply.hidden = false;
+  teacherRollback.hidden = true;
   teacherProposal.hidden = false;
 }
 
@@ -354,13 +366,17 @@ async function sendTeacherMessage() {
     const screenshotDataUrl = await screenshotToPngDataUrl(file);
     appendTeacherMessage('user', message || 'Проанализируй этот скриншот.', { screenshot: Boolean(file) });
     teacherMessage.value = '';
+    if (!file) {
+      await sendUnifiedProgrammerMessage(message);
+      return;
+    }
     const body = await api('/api/teacher/chat', {
       method: 'POST',
       body: JSON.stringify({
         message,
         screenshotDataUrl,
-        mode: 'jarvis',
-        useInternet: true,
+        mode: 'code',
+        useInternet: false,
         windowHandle: selectedWindowHandle,
         currentTask: taskInput.value.trim()
       })
@@ -399,6 +415,43 @@ async function sendTeacherMessage() {
   }
 }
 
+function latestErrorPrompt(packet) {
+  const error = packet?.error || {};
+  const parts = [
+    'Исправь последнюю зафиксированную ошибку Worker как программист системы.',
+    `Категория: ${packet?.category || 'не определена'}.`,
+    `Этап: ${packet?.phase || 'не определён'}.`,
+    `Код: ${error.code || 'worker_error'}.`,
+    `Сообщение: ${error.message || 'нет сообщения'}.`
+  ];
+  if (packet?.expectedResult) parts.push(`Ожидалось: ${packet.expectedResult}.`);
+  if (packet?.actualResult) parts.push(`Получилось: ${packet.actualResult}.`);
+  parts.push('Сначала найди первопричину по коду, журналу и актуальной документации. Затем подготовь минимальный патч в отдельной копии, добавь тест воспроизведения и покажи сравнение исходной и исправленной версии. Не меняй рабочую версию до моего нажатия «Применить проверенное изменение».');
+  return parts.join('\n');
+}
+
+async function fixLatestWorkerError() {
+  if (teacherBusy) return;
+  teacherFixLast.disabled = true;
+  teacherFixLast.textContent = 'Читаю журнал…';
+  try {
+    const body = await api('/api/self-improvement/errors?limit=1');
+    const packet = body.packets?.[0];
+    if (!packet) {
+      appendTeacherMessage('assistant', 'В журнале пока нет зафиксированных ошибок Worker. Опишите проблему текстом или приложите скриншот.');
+      return;
+    }
+    teacherMessage.value = latestErrorPrompt(packet);
+    teacherMessage.focus();
+    await sendTeacherMessage();
+  } catch (error) {
+    appendTeacherMessage('assistant', `Не удалось получить последнюю ошибку: ${error.message}`);
+  } finally {
+    teacherFixLast.disabled = false;
+    teacherFixLast.textContent = 'Исправить последнюю ошибку';
+  }
+}
+
 async function runTeacherTask() {
   if (!currentTeacherTask?.instruction || !currentTeacherTask.windowHandle || busy) return;
   await cancelMission();
@@ -427,11 +480,34 @@ async function applyTeacherCodeProposal() {
     appendTeacherMessage('assistant', body.applied
       ? `Изменение применено, полный набор тестов прошёл. Изменены файлы: ${body.files.join(', ')}. Для серверного кода перезапустите приложение.`
       : 'Изменение не прошло тесты и было автоматически отменено.');
-    teacherProposal.hidden = true;
-    currentTeacherProposal = null;
+    if (body.applied) {
+      teacherApply.hidden = true;
+      teacherRollback.hidden = false;
+      teacherProposalTests.textContent = 'Изменение установлено. Резервная копия сохранена; при проблеме нажмите «Откатить изменение».';
+    }
   } catch (error) {
     appendTeacherMessage('assistant', `Изменение не применено: ${error.message}`);
     teacherApply.disabled = false;
+  } finally {
+    teacherBusy = false;
+  }
+}
+
+async function rollbackTeacherCodeProposal() {
+  if (!currentTeacherProposal?.proposalId || teacherBusy) return;
+  teacherBusy = true;
+  teacherRollback.disabled = true;
+  try {
+    const body = await api('/api/teacher/code/rollback', {
+      method: 'POST',
+      body: JSON.stringify({ proposalId: currentTeacherProposal.proposalId, confirmed: true })
+    });
+    appendTeacherMessage('assistant', `Изменение откатано, восстановлены файлы: ${body.files.join(', ')}. Тесты после отката ${body.tests?.passed ? 'прошли' : 'требуют проверки'}.`);
+    teacherProposal.hidden = true;
+    currentTeacherProposal = null;
+  } catch (error) {
+    appendTeacherMessage('assistant', `Откат не завершён: ${error.message}`);
+    teacherRollback.disabled = false;
   } finally {
     teacherBusy = false;
   }
@@ -598,7 +674,7 @@ function updateControls() {
   anarchyButton.classList.toggle('active', anarchyMode);
   anarchyButton.textContent = anarchyAwaitingCorrection
     ? 'Продолжить свободу'
-    : semanticReplayMode ? 'Остановить повтор' : anarchyMode ? 'Остановить свободу' : 'Анархичность';
+    : semanticReplayMode ? 'Остановить повтор' : anarchyMode ? 'Остановить автономный режим' : 'Автономный режим';
   if (teachingRequested && !busy && !teachingSession) {
     teachingRequested = false;
     setTimeout(() => toggleTeaching(), 0);
@@ -662,6 +738,170 @@ async function refreshLatestDemonstration() {
       }
     }
   } catch { }
+}
+
+async function stopCurrentAgentSession(reason = 'user_stop') {
+  const sessionId = currentAgentSessionId;
+  currentAgentSessionId = null;
+  currentAgentSessionMode = null;
+  currentAgentSessionGoal = null;
+  currentAgentAwaitingUser = false;
+  currentAgentPendingApproval = null;
+  if (!sessionId) return;
+  try {
+    await api('/api/agent/sessions/stop', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId, reason })
+    });
+  } catch { }
+}
+
+async function ensureAgentSession({ goal, mode, windowHandle = null }) {
+  if (currentAgentSessionId && currentAgentSessionGoal === goal && currentAgentSessionMode === mode) {
+    return currentAgentSessionId;
+  }
+  await stopCurrentAgentSession('session_replaced');
+  const body = await api('/api/agent/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ goal, mode, windowHandle })
+  });
+  currentAgentSessionId = body.sessionId;
+  currentAgentSessionMode = mode;
+  currentAgentSessionGoal = goal;
+  currentAgentAwaitingUser = false;
+  currentAgentPendingApproval = null;
+  return currentAgentSessionId;
+}
+
+// Pressing «Стоп» or switching goals cancels the in-flight turn. The server
+// answers with the session_cancelled code and the stop reason as the message.
+// That is the user's own decision, so it must not be reported as a failure.
+function cancelledTurnNotice(error) {
+  if (error?.body?.error !== 'session_cancelled') return null;
+  return String(error.message || '').includes('session_replaced')
+    ? 'Предыдущая задача заменена новой; JARVIS продолжит по свежей цели.'
+    : 'Ход остановлен по вашей команде. Журнал сессии закрыт, ваши данные не изменены.';
+}
+
+function summarizeUnifiedTurn(turn) {
+  if (turn.kind === 'final') return turn.decision?.summary || 'Задача завершена.';
+  if (turn.kind === 'user_question') return turn.decision?.question || 'JARVIS просит уточнение.';
+  if (turn.kind === 'tool_proposal') {
+    return `JARVIS предлагает ${turn.proposal?.tool || 'локальное действие'}: ${turn.proposal?.reason || 'нужно подтверждение'}`;
+  }
+  if (turn.kind === 'tool_result') {
+    const result = turn.results?.[0];
+    return result?.status === 'completed'
+      ? `Выполнен инструмент ${result.tool}. Результат записан; следующий шаг будет принят по свежему состоянию.`
+      : `Инструмент ${result?.tool || turn.decision?.tool || 'неизвестен'} не выполнен: ${result?.error?.message || 'нет результата'}`;
+  }
+  return turn.state?.terminalReason || turn.state?.status || 'JARVIS обновил состояние задачи.';
+}
+
+async function runUnifiedAgentTurn({ autonomous = false } = {}) {
+  const inputText = taskInput.value.trim();
+  const goal = autonomous ? ANARCHY_INSTRUCTION : inputText;
+  if (!selectedWindowHandle || !goal || busy) return;
+  busy = true;
+  setStatus(autonomous ? 'Автономный режим анализирует свежий экран…' : 'JARVIS принимает следующее решение…');
+  updateControls();
+  try {
+    let turn;
+    if (currentAgentPendingApproval && currentAgentSessionId) {
+      turn = await api('/api/agent/sessions/approve', {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: currentAgentSessionId,
+          toolInvocationId: currentAgentPendingApproval.toolInvocationId
+        })
+      });
+      currentAgentPendingApproval = null;
+    } else if (currentAgentAwaitingUser && currentAgentSessionId) {
+      turn = await api('/api/agent/sessions/message', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: currentAgentSessionId, message: inputText })
+      });
+      currentAgentAwaitingUser = false;
+      currentAgentPendingApproval = null;
+    } else {
+      const sessionOptions = autonomous
+        ? { goal, mode: 'autonomous', windowHandle: selectedWindowHandle }
+        : { goal, mode: 'guided', windowHandle: selectedWindowHandle };
+      const sessionId = await ensureAgentSession(sessionOptions);
+      turn = await api('/api/agent/sessions/next', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId })
+      });
+    }
+    const report = summarizeUnifiedTurn(turn);
+    reportJarvis(turn.kind === 'tool_result' ? 'Действие' : 'Решение', report);
+    setStatus(report, { error: turn.results?.[0]?.status === 'failed' || turn.state?.status === 'failed' });
+    if (['final', 'terminal', 'cancelled'].includes(turn.kind)) {
+      currentAgentSessionId = null;
+      currentAgentSessionMode = null;
+      currentAgentSessionGoal = null;
+      currentAgentAwaitingUser = false;
+      currentAgentPendingApproval = null;
+      if (autonomous && anarchyMode) stopAnarchyLoop();
+    } else if (turn.kind === 'tool_proposal') {
+      currentAgentPendingApproval = turn.proposal;
+      taskButton.textContent = 'Подтвердить и выполнить';
+      if (autonomous) anarchyAwaitingCorrection = true;
+    } else if (turn.kind === 'user_question') {
+      taskInput.value = '';
+      taskInput.placeholder = turn.decision?.question || 'Ответьте JARVIS…';
+      taskButton.textContent = 'Ответить JARVIS';
+      currentAgentAwaitingUser = true;
+      if (autonomous) anarchyAwaitingCorrection = true;
+    } else if (autonomous && anarchyMode) {
+      clearAnarchyTimer();
+      const runId = anarchyRunId;
+      anarchyTimer = setTimeout(() => {
+        if (anarchyMode && runId === anarchyRunId) runUnifiedAgentTurn({ autonomous: true });
+      }, 350);
+    }
+  } catch (error) {
+    const notice = cancelledTurnNotice(error);
+    if (notice) {
+      setStatus(notice);
+    } else {
+      setStatus(`JARVIS не смог продолжить: ${error.message}`, { error: true });
+      reportJarvis('Ошибка', error.message);
+      if (autonomous) anarchyAwaitingCorrection = true;
+    }
+  } finally {
+    busy = false;
+    updateControls();
+  }
+}
+
+async function sendUnifiedProgrammerMessage(message) {
+  const sessionId = currentAgentAwaitingUser && currentAgentSessionMode === 'programmer'
+    ? currentAgentSessionId
+    : await ensureAgentSession({ goal: message, mode: 'programmer' });
+  let turn;
+  for (let index = 0; index < 10; index += 1) {
+    turn = currentAgentAwaitingUser
+      ? await api('/api/agent/sessions/message', {
+        method: 'POST', body: JSON.stringify({ sessionId, message })
+      })
+      : await api('/api/agent/sessions/next', {
+        method: 'POST', body: JSON.stringify({ sessionId })
+      });
+    currentAgentAwaitingUser = false;
+    currentAgentPendingApproval = null;
+    if (turn.kind !== 'tool_result') break;
+  }
+  appendTeacherMessage('assistant', summarizeUnifiedTurn(turn));
+  if (turn?.kind === 'user_question') currentAgentAwaitingUser = true;
+  if (['final', 'terminal', 'cancelled'].includes(turn?.kind)) {
+    currentAgentSessionId = null;
+    currentAgentSessionMode = null;
+    currentAgentSessionGoal = null;
+    currentAgentAwaitingUser = false;
+    currentAgentPendingApproval = null;
+  }
+  return turn;
 }
 
 async function watchSelectedWindow() {
@@ -1650,6 +1890,7 @@ windowSelect.addEventListener('focus', () => {
 });
 
 windowSelect.addEventListener('change', async () => {
+  await stopCurrentAgentSession('window_changed');
   await cancelMission();
   await cancelSkillRun();
   resetFeedbackView();
@@ -1664,18 +1905,25 @@ taskInput.addEventListener('input', () => {
   if (anarchyMode) anarchyMode = false;
   anarchyResumeGoal = null;
   if (currentMission && taskInput.value.trim() !== currentMission.instruction) cancelMission();
+  if (currentAgentSessionId && !currentAgentAwaitingUser && taskInput.value.trim() !== currentAgentSessionGoal) {
+    stopCurrentAgentSession('goal_changed');
+  }
   resetFeedbackView();
-  taskButton.textContent = currentMission ? 'Следующий шаг' : 'Подготовить первый шаг';
+  taskButton.textContent = currentAgentPendingApproval
+    ? 'Подтвердить и выполнить'
+    : currentAgentAwaitingUser
+    ? 'Ответить JARVIS'
+    : currentMission ? 'Следующий шаг' : 'Подготовить первый шаг';
   updateControls();
 });
 
 correctionInput.addEventListener('input', updateControls);
 
 taskInput.addEventListener('keydown', (event) => {
-  if (event.ctrlKey && event.key === 'Enter') planNextStep();
+  if (event.ctrlKey && event.key === 'Enter') runUnifiedAgentTurn();
 });
 
-taskButton.addEventListener('click', () => planNextStep());
+taskButton.addEventListener('click', () => runUnifiedAgentTurn());
 executeButton.addEventListener('click', () => executeStep());
 teachStepButton.addEventListener('click', teachCurrentStep);
 positiveButton.addEventListener('click', () => rateStep('positive'));
@@ -1691,10 +1939,16 @@ teacherScreenshot.addEventListener('change', () => {
   teacherAttachment.textContent = teacherScreenshot.files?.[0]?.name || 'Файл не выбран';
 });
 teacherSend.addEventListener('click', sendTeacherMessage);
+teacherFixLast.addEventListener('click', fixLatestWorkerError);
+programmerButton.addEventListener('click', () => {
+  document.querySelector('#teacher-chat')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  window.setTimeout(() => teacherMessage.focus(), 250);
+});
 teacherMessage.addEventListener('keydown', (event) => {
   if (event.ctrlKey && event.key === 'Enter') sendTeacherMessage();
 });
 teacherApply.addEventListener('click', applyTeacherCodeProposal);
+teacherRollback.addEventListener('click', rollbackTeacherCodeProposal);
 teacherTaskRun.addEventListener('click', runTeacherTask);
 teacherSave.addEventListener('click', async () => {
   teacherSave.disabled = true;
@@ -1723,13 +1977,13 @@ anarchyButton.addEventListener('click', async () => {
       anarchyAwaitingCorrection = false;
       anarchyRecoveryState = resetAnarchyRecoveryState();
       hideCorrection();
-      await cancelMission();
-      setStatus('Свободный режим продолжен. JARVIS выбирает новую цель по свежему экрану…');
+      setStatus('Автономный режим продолжен. JARVIS выбирает следующий шаг по свежему экрану…');
       updateControls();
-      await planNextStep(false, anarchyRunId);
+      await runUnifiedAgentTurn({ autonomous: true });
       return;
     }
     stopAnarchyLoop();
+    await stopCurrentAgentSession('autonomous_mode_stopped');
     await cancelMission();
     resetFeedbackView();
     setStatus('Автономная сессия остановлена. Обычная задача и ваши данные не изменены.');
@@ -1737,6 +1991,7 @@ anarchyButton.addEventListener('click', async () => {
     return;
   }
   if (busy || !selectedWindowHandle) return;
+  await stopCurrentAgentSession('autonomous_mode_started');
   await cancelMission();
   await cancelSkillRun();
   hideCorrection();
@@ -1747,9 +2002,9 @@ anarchyButton.addEventListener('click', async () => {
   anarchyRunId += 1;
   anarchyStepCount = 0;
   anarchyResumeGoal = null;
-  setStatus('JARVIS начал непрерывное автономное обучение в выбранной программе. Он сам ставит гипотезы, выполняет и проверяет действия без подтверждений и работает до повторного нажатия «Анархичность» или «Стоп».');
+  setStatus('JARVIS начал автономный режим в выбранной программе. Все решения идут через одну AgentSession и единый журнал событий; остановить можно этой кнопкой или «Стоп».' );
   updateControls();
-  await planNextStep(false, anarchyRunId);
+  await runUnifiedAgentTurn({ autonomous: true });
 });
 
 safetyToggle.addEventListener('click', async () => {
@@ -1763,6 +2018,7 @@ safetyToggle.addEventListener('click', async () => {
       });
     } else {
       if (anarchyMode) stopAnarchyLoop();
+      await stopCurrentAgentSession('safety_pause');
       setStatus('Останавливаю действия, наблюдение и LM Server…');
       await api('/api/safety/pause', {
         method: 'POST',
@@ -1784,6 +2040,7 @@ fullShutdownButton.addEventListener('click', async () => {
   if (fullShutdownActive) return;
   fullShutdownActive = true;
   if (anarchyMode) stopAnarchyLoop();
+  await stopCurrentAgentSession('full_shutdown');
   clearAnarchyTimer();
   stopTeachingPoll();
   statusDot.className = 'status-dot pending';

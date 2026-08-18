@@ -95,7 +95,7 @@ export async function startLmStudioRuntime({
   model,
   modelKey = process.env.AI_WORKSTATION_LM_STUDIO_MODEL_KEY || model,
   gpuOffload = process.env.AI_WORKSTATION_LM_STUDIO_GPU_OFFLOAD || 'max',
-  contextLength = process.env.AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH || '8192',
+  contextLength = process.env.AI_WORKSTATION_LM_STUDIO_CONTEXT_LENGTH || '12288',
   parallel = process.env.AI_WORKSTATION_LM_STUDIO_PARALLEL || '1'
 }) {
   const url = new URL(baseUrl);
@@ -130,4 +130,17 @@ export async function startLmStudioRuntime({
     model,
     errors: []
   };
+}
+
+export async function activateExclusiveLmStudioModel(options) {
+  const model = String(options?.model || '').trim();
+  if (!model) throw new TypeError('A model identifier is required.');
+  let loaded = '';
+  try { loaded = await runLms(['ps'], 30_000); } catch { }
+  if (loaded.toLowerCase().includes(model.toLowerCase())) {
+    return { running: true, modelLoaded: true, model, switched: false };
+  }
+  if (loaded.trim()) await runLms(['unload', '-a'], 60_000);
+  const started = await startLmStudioRuntime(options);
+  return { ...started, switched: true };
 }

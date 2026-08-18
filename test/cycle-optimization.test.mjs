@@ -56,9 +56,26 @@ test('visual gestures, recovery, failure and human correction keep teacher revie
   }
 });
 
-test('external, autonomous and low-confidence actions keep teacher review', () => {
+test('anarchy tries one local reversible click before a second teacher call', () => {
+  const decision = decideTeacherReview(safeClick({
+    missionMode: 'anarchy',
+    proposal: { action: { type: 'click', point: { x: 0.5, y: 0.5 } } }
+  }));
+  assert.equal(decision.required, false);
+  assert.equal(decision.route, 'anarchy_try_then_verify');
+  assert.equal(skippedTeacherApproval(decision).approved, true);
+});
+
+test('anarchy returns to teacher review after a failed attempt', () => {
+  assert.equal(decideTeacherReview(safeClick({
+    missionMode: 'anarchy',
+    history: [{ validation: { success: false } }]
+  })).required, true);
+});
+
+test('external, non-click autonomous and low-confidence actions keep teacher review', () => {
   assert.equal(decideTeacherReview(safeClick({ policy: { effectiveRisk: 'external_effect', externalEnvironment: true } })).required, true);
-  assert.equal(decideTeacherReview(safeClick({ missionMode: 'anarchy' })).required, true);
+  assert.equal(decideTeacherReview(safeClick({ missionMode: 'anarchy', proposal: { action: { type: 'drag' } } })).required, true);
   assert.equal(decideTeacherReview(safeClick({ proposal: { action: { type: 'click' }, confidence: 0.7 } })).required, true);
   assert.equal(decideTeacherReview(safeClick({ grounding: { reason: 'semantic_target_found', confidence: 0.7 } })).required, true);
 });

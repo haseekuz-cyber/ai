@@ -34,8 +34,8 @@ async function callWorker(pathname, options = {}) {
   const response = await fetch(`http://${config.host}:${config.workerPort}${pathname}`, {
     ...fetchOptions,
     headers: {
-      authorization: `Bearer ${config.authToken}`,
-      'content-type': 'application/json',
+      Authorization: `Bearer ${config.authToken}`,
+      'Content-Type': 'application/json',
       ...(options.headers || {})
     },
     signal: AbortSignal.timeout(timeoutMs)
@@ -44,7 +44,6 @@ async function callWorker(pathname, options = {}) {
   const value = await response.json();
   return { status: response.status, value };
 }
-
 async function systemState() {
   const worker = await callWorker('/health');
   const independentControl = evaluateIndependentControl(worker.value);
@@ -281,6 +280,77 @@ const server = http.createServer(async (request, response) => {
       }
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/agent/sessions') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/agent/sessions', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 60_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/agent/sessions/next') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/agent/sessions/next', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 240_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/agent/sessions/approve') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/agent/sessions/approve', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 240_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/agent/sessions/message') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/agent/sessions/message', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 240_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/agent/sessions/stop') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/agent/sessions/stop', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 30_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/agent/sessions/status') {
+      try {
+        const worker = await callWorker('/agent/sessions/status' + `?sessionId=${encodeURIComponent(url.searchParams.get('sessionId') || '')}`, {
+          timeoutMs: 15_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/missions') {
       try {
         const input = await readJson(request);
@@ -387,6 +457,28 @@ const server = http.createServer(async (request, response) => {
         return sendJson(response, worker.status, worker.value);
       } catch (error) {
         return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/teacher/code/rollback') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/teacher/code/rollback', {
+          method: 'POST', body: JSON.stringify(input), timeoutMs: 180_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/self-improvement/errors') {
+      try {
+        const limit = url.searchParams.get('limit') || '20';
+        const worker = await callWorker(`/self-improvement/errors?limit=${encodeURIComponent(limit)}`, { timeoutMs: 15_000 });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, 503, { error: 'worker_unavailable', message: error.message });
       }
     }
 
@@ -510,6 +602,34 @@ const server = http.createServer(async (request, response) => {
       try {
         const input = await readJson(request);
         const worker = await callWorker('/skills/cancel-run', { method: 'POST', body: JSON.stringify(input) });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/skills/apply-demonstrated-correction') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/skills/apply-demonstrated-correction', {
+          method: 'POST',
+          body: JSON.stringify(input),
+          timeoutMs: 60_000
+        });
+        return sendJson(response, worker.status, worker.value);
+      } catch (error) {
+        return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/skills/apply-plan-correction') {
+      try {
+        const input = await readJson(request);
+        const worker = await callWorker('/skills/apply-plan-correction', {
+          method: 'POST',
+          body: JSON.stringify(input),
+          timeoutMs: 60_000
+        });
         return sendJson(response, worker.status, worker.value);
       } catch (error) {
         return sendJson(response, error.statusCode || 503, { error: 'worker_unavailable', message: error.message });

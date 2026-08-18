@@ -1,26 +1,118 @@
 import fs from 'node:fs/promises';
+import { config } from './config.mjs';
 import { adaptGuiModelAnalysis } from './gui-model-adapter.mjs';
+import { AGENT_DECISION_SCHEMA, UNIFIED_AGENT_SYSTEM_PROMPT } from './agent-model-protocol.mjs';
 
 const activeRequestControllers = new Set();
+let lmStudioRequestBroker = null;
+const agentContextTokenLimit = Number.isSafeInteger(Number(process.env.AI_WORKSTATION_AGENT_CONTEXT_TOKENS))
+ ? Number(process.env.AI_WORKSTATION_AGENT_CONTEXT_TOKENS)
+ : config.unifiedAgentContextTokens;
+// The ContextCompiler already fits the context to 65% of the model window. This
+// outer guard must stay looser than that, otherwise every compiled context is
+// reduced a second time and the compiler's structural work is thrown away.
+const maxAgentPromptTokens = Math.max(4_096, Math.floor(agentContextTokenLimit * 0.70));
+const maxAgentPromptCharacters = Math.min(100_000, maxAgentPromptTokens * 4);
+const stringShorteningLimits = [2_000, 500, 120, 40];
 const truncationRetryFloor = 1_600;
 const truncationRetryCeiling = Math.max(
   truncationRetryFloor,
   Math.min(Number(process.env.AI_WORKSTATION_LM_MAX_OUTPUT_TOKENS) || 4_096, 8_192)
 );
 
-function trackedRequestSignal(timeoutMs) {
+function shortenString(value, limit) {
+  if (typeof value !== 'string' || value.length <= limit) return value;
+  return `${value.slice(0, limit)}…[truncated ${value.length - limit} characters]`;
+}
+
+function shortenLongStrings(value, limit) {
+  if (typeof value === 'string') return shortenString(value, limit);
+  if (Array.isArray(value)) return value.map((entry) => shortenLongStrings(entry, limit));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, shortenLongStrings(entry, limit)]));
+  }
+  return value;
+}
+
+// Slicing the serialized prompt cut JSON in the middle of a structure and, on a
+// format-repair round, cut the repair instruction off entirely. Reduce the
+// context structurally instead, so the model always receives parsable JSON and
+// always sees why its previous answer was rejected.
+function fitAgentPromptToWindow(context, envelope = {}, characterBudget = maxAgentPromptCharacters) {
+  const serialize = (value) => JSON.stringify({ context: value, ...envelope });
+  const original = serialize(context);
+  if (original.length <= characterBudget) return original;
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    return serialize(shortenLongStrings(context, Math.max(40, characterBudget - 200)));
+  }
+
+  const reduction = { reason: 'the context exceeded the agent prompt window and was reduced before the request.' };
+  // `base` keeps the untouched strings so every shortening pass starts from the
+  // original text instead of nesting one truncation marker inside another.
+  const base = { ...context };
+  let shorteningLimit = null;
+  const render = () => ({
+    ...(shorteningLimit === null ? base : shortenLongStrings(base, shorteningLimit)),
+    contextReduction: reduction
+  });
+  const fits = () => serialize(render()).length <= characterBudget;
+
+  // One pathological string must not cost the whole memory and event history,
+  // so the widest shortening pass runs before anything is dropped.
+  const [widestLimit, ...tighterLimits] = stringShorteningLimits;
+  if (JSON.stringify(shortenLongStrings(base, widestLimit)).length < JSON.stringify(base).length) {
+    shorteningLimit = widestLimit;
+    reduction.shortenedStringsOver = widestLimit;
+  }
+
+  if (!fits() && Array.isArray(base.recentEvents) && base.recentEvents.length > 1) {
+    const events = [...base.recentEvents];
+    while (events.length > 1) {
+      events.shift();
+      base.recentEvents = events;
+      if (fits()) break;
+    }
+    reduction.droppedOldestEvents = context.recentEvents.length - events.length;
+  }
+  if (!fits() && Array.isArray(base.relevantMemory) && base.relevantMemory.length > 1) {
+    const memory = [...base.relevantMemory];
+    while (memory.length > 1) {
+      memory.pop();
+      base.relevantMemory = memory;
+      if (fits()) break;
+    }
+    reduction.droppedLeastRelevantMemories = context.relevantMemory.length - memory.length;
+  }
+
+  for (const limit of tighterLimits) {
+    if (fits()) break;
+    shorteningLimit = limit;
+    reduction.shortenedStringsOver = limit;
+  }
+  if (fits()) return serialize(render());
+
+  // Last resort: keep only the pinned block, still as valid JSON.
+  reduction.droppedEverythingExceptPinned = true;
+  const pinnedOnly = { pinned: shortenLongStrings(base.pinned ?? null, 400), contextReduction: reduction };
+  const serialized = serialize(pinnedOnly);
+  return serialized.length <= characterBudget ? serialized : serialize({ contextReduction: reduction });
+}
+
+function trackedRequestSignal(timeoutMs, externalSignal = null) {
   const controller = new AbortController();
   activeRequestControllers.add(controller);
+  const signals = [controller.signal, AbortSignal.timeout(timeoutMs)];
+  if (externalSignal) signals.push(externalSignal);
   return {
-    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
+    signal: AbortSignal.any(signals),
     dispose() {
       activeRequestControllers.delete(controller);
     }
   };
 }
 
-async function requestLmStudioJson(url, options, timeoutMs) {
-  const tracked = trackedRequestSignal(timeoutMs);
+async function requestLmStudioJson(url, options, timeoutMs, signal = null) {
+  const tracked = trackedRequestSignal(timeoutMs, signal);
   try {
     const response = await fetch(url, { ...options, signal: tracked.signal });
     const body = await response.json();
@@ -40,6 +132,11 @@ export function activeLmStudioRequestCount() {
   return activeRequestControllers.size;
 }
 
+export function configureLmStudioRequestBroker(broker = null) {
+  if (broker != null && typeof broker.runModel !== 'function') throw new TypeError('LM Studio request broker must expose runModel().');
+  lmStudioRequestBroker = broker;
+}
+
 export const DEFAULT_SYSTEM_PROMPT = `You are the read-only visual perception module of a Windows assistant.
 Analyze only what is visible in the provided screenshot. Never claim that you clicked, typed, sent, opened, or changed anything.
 Return JSON only, without markdown fences. Use this exact top-level shape:
@@ -54,14 +151,14 @@ Return JSON only, without markdown fences. Use this exact top-level shape:
 }
 Coordinates are normalized to the image from 0 to 1. Do not invent obscured text or off-screen state.`;
 
-export function normalizeVisionPrompt(value) {
+export function normalizeVisionPrompt(value, maxLength = 4_000) {
   if (value == null || value === '') {
     return 'Опиши видимое окно, выдели важный текст и элементы управления. Ничего не выполняй.';
   }
   if (typeof value !== 'string') throw new TypeError('prompt must be a string.');
   const prompt = value.trim();
   if (!prompt) throw new TypeError('prompt must not be empty.');
-  if (prompt.length > 4_000) throw new TypeError('prompt is too long.');
+  if (prompt.length > maxLength) throw new TypeError('prompt is too long.');
   return prompt;
 }
 
@@ -93,13 +190,14 @@ export function parseModelJson(content) {
   }
 }
 
-export function buildVisionRequest({ model, prompt, imageDataUrl, systemPrompt = DEFAULT_SYSTEM_PROMPT, maxOutputTokens = 1800 }) {
+export function buildVisionRequest({ model, prompt, imageDataUrl, systemPrompt = DEFAULT_SYSTEM_PROMPT, maxOutputTokens = 1800, maxPromptLength = 4_000 }) {
   return buildMultiImageVisionRequest({
     model,
     prompt,
     imageDataUrls: [imageDataUrl],
     systemPrompt,
-    maxOutputTokens
+    maxOutputTokens,
+    maxPromptLength
   });
 }
 
@@ -108,7 +206,8 @@ export function buildMultiImageVisionRequest({
   prompt,
   imageDataUrls,
   systemPrompt = DEFAULT_SYSTEM_PROMPT,
-  maxOutputTokens = 1800
+  maxOutputTokens = 1800,
+  maxPromptLength = 4_000
 }) {
   if (typeof model !== 'string' || !model.trim()) throw new TypeError('LM Studio model is required.');
   if (!Array.isArray(imageDataUrls) || imageDataUrls.length === 0 || imageDataUrls.length > 4) {
@@ -121,12 +220,12 @@ export function buildMultiImageVisionRequest({
     model: model.trim(),
     system_prompt: systemPrompt,
     input: [
-      { type: 'text', content: normalizeVisionPrompt(prompt) },
+      { type: 'text', content: normalizeVisionPrompt(prompt, maxPromptLength) },
       ...imageDataUrls.map((dataUrl) => ({ type: 'image', data_url: dataUrl }))
     ],
     temperature: 0,
     max_output_tokens: maxOutputTokens,
-    context_length: 8192,
+    context_length: agentContextTokenLimit,
     store: false,
     stream: false
   };
@@ -140,16 +239,16 @@ async function readPngDataUrl(imagePath, maxImageBytes) {
   return `data:image/png;base64,${image.toString('base64')}`;
 }
 
-export function buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens = 800 }) {
+export function buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens = 800, maxPromptLength = 20_000 }) {
   if (typeof model !== 'string' || !model.trim()) throw new TypeError('LM Studio model is required.');
   if (typeof systemPrompt !== 'string' || !systemPrompt.trim()) throw new TypeError('systemPrompt is required.');
   return {
     model: model.trim(),
     system_prompt: systemPrompt.trim(),
-    input: [{ type: 'text', content: normalizeTextPrompt(prompt) }],
+    input: [{ type: 'text', content: normalizeTextPrompt(prompt, maxPromptLength) }],
     temperature: 0,
     max_output_tokens: maxOutputTokens,
-    context_length: 8192,
+    context_length: agentContextTokenLimit,
     store: false,
     stream: false
   };
@@ -247,6 +346,9 @@ function responseFormat(name, schema) {
 }
 
 function responseFormatForSystemPrompt(systemPrompt) {
+  if (systemPrompt === UNIFIED_AGENT_SYSTEM_PROMPT) {
+    return responseFormat('jarvis_agent_decision', AGENT_DECISION_SCHEMA);
+  }
   if (systemPrompt.includes('local interface planner')) {
     return responseFormat('next_ui_action', plannerSchema);
   }
@@ -498,26 +600,31 @@ function nextOutputTokenLimit(current) {
   return Math.min(truncationRetryCeiling, Math.max(truncationRetryFloor, Math.ceil(Number(current) * 2)));
 }
 
-async function requestStructuredCompletion({ baseUrl, requestBody, timeoutMs }) {
-  let maxOutputTokens = Math.max(1, Number(requestBody.max_output_tokens) || 1);
-  let truncationRetries = 0;
-  while (true) {
-    const attemptBody = { ...requestBody, max_output_tokens: maxOutputTokens };
-    const { response, body } = await requestLmStudioJson(`${baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(toStructuredChatCompletionRequest(attemptBody))
-    }, timeoutMs);
-    if (!response.ok) throw new Error(body?.error?.message || body?.error || `LM Studio HTTP ${response.status}`);
-    try {
-      const finishReason = assertCompletionFinished(body);
-      return { body, finishReason, maxOutputTokens, truncationRetries };
-    } catch (error) {
-      if (error.code !== 'lm_output_truncated' || maxOutputTokens >= truncationRetryCeiling) throw error;
-      maxOutputTokens = nextOutputTokenLimit(maxOutputTokens);
-      truncationRetries += 1;
+async function requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal = null, useBroker = true }) {
+  const execute = async () => {
+    let maxOutputTokens = Math.max(1, Number(requestBody.max_output_tokens) || 1);
+    let truncationRetries = 0;
+    while (true) {
+      const attemptBody = { ...requestBody, max_output_tokens: maxOutputTokens };
+      const { response, body } = await requestLmStudioJson(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(toStructuredChatCompletionRequest(attemptBody))
+      }, timeoutMs, signal);
+      if (!response.ok) throw new Error(body?.error?.message || body?.error || `LM Studio HTTP ${response.status}`);
+      try {
+        const finishReason = assertCompletionFinished(body);
+        return { body, finishReason, maxOutputTokens, truncationRetries };
+      } catch (error) {
+        if (error.code !== 'lm_output_truncated' || maxOutputTokens >= truncationRetryCeiling) throw error;
+        maxOutputTokens = nextOutputTokenLimit(maxOutputTokens);
+        truncationRetries += 1;
+      }
     }
-  }
+  };
+  return useBroker && lmStudioRequestBroker
+    ? lmStudioRequestBroker.runModel(requestBody.model, execute)
+    : execute();
 }
 
 export async function getLmStudioStatus({ baseUrl, timeoutMs = 5_000 }) {
@@ -542,8 +649,11 @@ export async function analyzeImageWithLmStudio({
   prompt,
   systemPrompt,
   maxOutputTokens,
+  maxPromptLength = 4_000,
   maxImageBytes = 20 * 1024 * 1024,
-  timeoutMs = 180_000
+  timeoutMs = 180_000,
+  signal = null,
+  useBroker = true
 }) {
   const imageDataUrl = await readPngDataUrl(imagePath, maxImageBytes);
   const requestBody = buildVisionRequest({
@@ -551,11 +661,12 @@ export async function analyzeImageWithLmStudio({
     prompt,
     imageDataUrl,
     systemPrompt,
-    maxOutputTokens
+    maxOutputTokens,
+    maxPromptLength
   });
 
   const { body, finishReason, maxOutputTokens: usedOutputTokenLimit, truncationRetries } =
-    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs });
+    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal, useBroker });
   const raw = outputText(body);
   return {
     model: body.model_instance_id || body.model || model,
@@ -613,11 +724,14 @@ export async function analyzeTextWithLmStudio({
   prompt,
   systemPrompt,
   maxOutputTokens = 800,
-  timeoutMs = 180_000
+  maxPromptLength = 20_000,
+  timeoutMs = 180_000,
+  signal = null,
+  useBroker = true
 }) {
-  const requestBody = buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens });
+  const requestBody = buildTextRequest({ model, prompt, systemPrompt, maxOutputTokens, maxPromptLength });
   const { body, finishReason, maxOutputTokens: usedOutputTokenLimit, truncationRetries } =
-    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs });
+    await requestStructuredCompletion({ baseUrl, requestBody, timeoutMs, signal, useBroker });
   const raw = outputText(body);
   return {
     model: body.model_instance_id || body.model || model,
@@ -629,5 +743,53 @@ export async function analyzeTextWithLmStudio({
       truncationRetries
     },
     finishReason
+  };
+}
+
+export function createLmStudioAgentClient({ baseUrl, timeoutMs = 180_000, maxOutputTokens = 1_600 } = {}) {
+  if (typeof baseUrl !== 'string' || !baseUrl.trim()) throw new TypeError('LM Studio baseUrl is required.');
+  return async function lmStudioAgentClient(context, {
+    model,
+    signal = null,
+    systemPrompt = UNIFIED_AGENT_SYSTEM_PROMPT,
+    responseSchema = AGENT_DECISION_SCHEMA,
+    repair = false,
+    formatError = null
+  } = {}) {
+    if (responseSchema !== AGENT_DECISION_SCHEMA) throw new TypeError('Unsupported agent decision schema.');
+    const prompt = fitAgentPromptToWindow(context, repair ? {
+      formatRepair: {
+        error: String(formatError || 'The prior response did not match the decision schema.'),
+        instruction: 'Return one corrected decision using the same context.'
+      }
+    } : {});
+    const screenshotPath = context?.pinned?.lastToolResult?.result?.screenshotPath ||
+      context?.pinned?.lastObservation?.screenshotPath || null;
+    const maxPromptLength = maxAgentPromptCharacters;
+    const result = screenshotPath
+      ? await analyzeImageWithLmStudio({
+        baseUrl,
+        model,
+        imagePath: screenshotPath,
+        prompt,
+        systemPrompt,
+        maxOutputTokens,
+        maxPromptLength,
+        timeoutMs,
+        signal,
+        useBroker: false
+      })
+      : await analyzeTextWithLmStudio({
+        baseUrl,
+        model,
+        prompt,
+        systemPrompt,
+        maxOutputTokens,
+        maxPromptLength,
+        timeoutMs,
+        signal,
+        useBroker: false
+      });
+    return result.analysis;
   };
 }

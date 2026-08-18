@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { groundLearnedStepToElements } from '../src/skill-runner.mjs';
+import { createSkillRunState, groundLearnedStepToElements } from '../src/skill-runner.mjs';
+import { sameWindowIdentity } from '../src/window-context.mjs';
 
 const bounds = { x: 1920, y: 0, width: 1920, height: 1080 };
 
@@ -58,4 +59,32 @@ test('a resized generic surface blocks a learned point that no longer belongs to
   }], bounds);
   assert.equal(result.blocked, true);
   assert.equal(result.reason, 'generic_surface_point_outside_current_surface');
+});
+
+test('a prepared learned skill run preserves window identity independently from geometry', () => {
+  const window = {
+    processId: 120,
+    processName: 'ExampleApp',
+    nativeWindowHandle: 777,
+    name: 'Document 1*',
+    bounds
+  };
+  const run = createSkillRunState({
+    runId: 'run-1',
+    skill: { skillId: 'skill-1' },
+    skillPath: 'skill.json',
+    steps: [{ type: 'click' }],
+    window,
+    windowHandle: 777,
+    now: 1_000
+  });
+
+  assert.ok(run.windowIdentity);
+  assert.notEqual(run.windowIdentity, window);
+  assert.equal(sameWindowIdentity({
+    ...window,
+    name: 'Document 1',
+    bounds: { x: 2100, y: 40, width: 1500, height: 900 }
+  }, run.windowIdentity), true);
+  assert.equal(sameWindowIdentity({ ...window, nativeWindowHandle: 778 }, run.windowIdentity), false);
 });

@@ -4,9 +4,20 @@ const fastPathGrounding = new Set([
   'inside_editable_target',
   'single_editable_target'
 ]);
+const anarchyTryFirstActions = new Set(['click', 'doubleClick', 'typeText']);
 
 function hasRecentFailure(history) {
   return Array.isArray(history) && history.some((item) => item?.validation?.success !== true);
+}
+
+function isLocalAnarchyAttempt({ proposal, policy, missionMode, history, recoveryAttempts }) {
+  if (missionMode !== 'anarchy') return false;
+  if (!anarchyTryFirstActions.has(proposal?.action?.type)) return false;
+  if (!['read_only', 'local_change'].includes(policy?.effectiveRisk)) return false;
+  if (policy?.externalEnvironment === true) return false;
+  if (hasRecentFailure(history) || Number(recoveryAttempts) > 0) return false;
+  const point = proposal?.action?.point;
+  return point && Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y));
 }
 
 /**
@@ -24,6 +35,17 @@ export function decideTeacherReview({
   missionMode = 'guided',
   visualRefinement = null
 } = {}) {
+  // The Planner output is already JARVIS's decision. In anarchy mode a
+  // second model call before an ordinary local click only discusses the same
+  // step again. Try once, validate the fresh result, and restore the Teacher
+  // after any failure.
+  if (isLocalAnarchyAttempt({ proposal, policy, missionMode, history, recoveryAttempts })) {
+    return {
+      required: false,
+      route: 'anarchy_try_then_verify',
+      reasons: ['single_reversible_attempt', 'fresh_post_action_validation_required']
+    };
+  }
   const reasons = [];
   const actionType = proposal?.action?.type || '';
 
@@ -53,7 +75,7 @@ export function decideTeacherReview({
 
 export function skippedTeacherApproval(decision) {
   if (decision?.required !== false) throw new TypeError('A skipped approval requires a fast-path decision.');
-  const exploratory = decision.route === 'anarchy_exploratory_probe';
+  const exploratory = ['anarchy_exploratory_probe', 'anarchy_try_then_verify'].includes(decision.route);
   return {
     decision: 'approve',
     approved: true,
