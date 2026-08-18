@@ -20,6 +20,11 @@ $powershell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 
 New-Item -ItemType Directory -Path $logRoot, $stateRoot -Force | Out-Null
 
+# Must run before Ensure-LmStudioModel and before the components are started,
+# so the weights loaded into VRAM and the model the components ask for match.
+. (Join-Path $PSScriptRoot 'model-defaults.ps1')
+Set-DefaultLocalModel | Out-Null
+
 function Test-ListeningPort {
     param([Parameter(Mandatory)][int]$Port)
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)

@@ -13,6 +13,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 public sealed class AiPointerForm : Form
@@ -34,6 +35,28 @@ public sealed class AiPointerForm : Form
         PointerLabel = "AI";
         MessageText = "";
         Tone = "working";
+    }
+
+    // The overlay floats above the target application, so every screen grab used to contain
+    // the agent's own cursor and speech bubble, and the change detector read them as
+    // application change. WDA_EXCLUDEFROMCAPTURE keeps the overlay on the monitor but out of
+    // every capture, so what shows through is the application itself. The call only succeeds
+    // from the process that owns the window (cross-process it fails with ACCESS_DENIED) and
+    // needs Windows 10 2004 or newer, so its result is recorded rather than assumed.
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
+
+    private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+
+    public bool ExcludedFromCapture { get; private set; }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        // Re-applied on every handle creation: WinForms recreates the handle when window
+        // styles change, and the affinity does not survive that.
+        ExcludedFromCapture = SetWindowDisplayAffinity(Handle, WDA_EXCLUDEFROMCAPTURE);
     }
 
     protected override bool ShowWithoutActivation
@@ -138,6 +161,7 @@ public static class GraphicsExtensions
 '@ -ReferencedAssemblies System.Windows.Forms,System.Drawing
 
 $resolvedStatePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StatePath)
+$captureStatusPath = Join-Path (Split-Path -Parent $resolvedStatePath) 'virtual-pointer-capture.json'
 $form = [AiPointerForm]::new()
 $form.Location = [System.Drawing.Point]::new(-500, -500)
 $form.Opacity = 0.96
@@ -174,6 +198,25 @@ $timer.Add_Tick({
     }
 })
 
-$form.Add_Shown({ $timer.Start() })
+$form.Add_Shown({
+    $timer.Start()
+    # This process is started with its output ignored, so record whether the capture
+    # exclusion took effect: without it the overlay is back inside every screen grab and
+    # the change detector silently degrades instead of failing.
+    try {
+        [ordered]@{
+            schemaVersion = 1
+            excludedFromCapture = [bool]$form.ExcludedFromCapture
+            reportedAt = (Get-Date).ToUniversalTime().ToString('o')
+        } | ConvertTo-Json -Compress | ForEach-Object {
+            # WriteAllText rather than Set-Content: Windows PowerShell writes a BOM that
+            # JSON.parse on the reading side rejects.
+            [System.IO.File]::WriteAllText($captureStatusPath, $_, [System.Text.UTF8Encoding]::new($false))
+        }
+    }
+    catch {
+        # A diagnostic write must never take the overlay down with it.
+    }
+})
 $form.Add_FormClosed({ $timer.Stop(); $timer.Dispose() })
 [System.Windows.Forms.Application]::Run($form)
