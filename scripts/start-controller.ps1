@@ -15,22 +15,8 @@ elseif (Test-Path -LiteralPath 'D:\AI-Work\Agent-Data') {
 else {
     Join-Path $projectRoot 'artifacts'
 }
-$packagedNode = Join-Path $projectRoot 'runtime\node.exe'
-$bundledNode = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
-$nodeCommand = Get-Command node -ErrorAction SilentlyContinue
-
-if (Test-Path -LiteralPath $packagedNode) {
-    $node = $packagedNode
-}
-elseif ($nodeCommand) {
-    $node = $nodeCommand.Source
-}
-elseif (Test-Path -LiteralPath $bundledNode) {
-    $node = $bundledNode
-}
-else {
-    throw 'Node.js 22 or newer is required for the proof-of-concept.'
-}
+. (Join-Path $PSScriptRoot 'resolve-node.ps1')
+$node = Resolve-NodeExecutable -ProjectRoot $projectRoot
 
 $env:AI_WORKSTATION_CONTROLLER_PORT = [string]$Port
 $env:AI_WORKSTATION_WORKER_PORT = [string]$WorkerPort
