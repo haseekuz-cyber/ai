@@ -18,6 +18,8 @@ else {
 }
 . (Join-Path $PSScriptRoot 'resolve-node.ps1')
 $node = Resolve-NodeExecutable -ProjectRoot $projectRoot
+. (Join-Path $PSScriptRoot 'model-defaults.ps1')
+Set-DefaultLocalModel | Out-Null
 
 $env:AI_WORKSTATION_WORKER_PORT = [string]$Port
 if ($DisplayDevice) {
