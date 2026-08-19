@@ -20,8 +20,24 @@ Use research only when public documentation about the selected application can r
 Use abort only for an irreversible or externally dangerous request. Ordinary uncertainty, a failed local action, or a blocking popup must become revise or research, not abort. Do not ask the user to solve the planning problem.
 Do not invent controls, coordinates, completed results, or user intent. Do not perform actions yourself.`;
 
+const REVIEW_PROMPT_LIMIT = 3_900;
+
 function boundedText(value, maxLength = 1_000) {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
+}
+
+// Truncates every string in place without removing a field. The reviewed proposal may carry a
+// guardedMiniPlan whose queued actions the teacher is required to see, so shrinking it must
+// never drop structure the safety contract depends on.
+function boundedStrings(value, maxLength, depth = 0) {
+  if (typeof value === 'string') return value.slice(0, maxLength);
+  if (depth >= 8) return Array.isArray(value) ? [] : value;
+  if (Array.isArray(value)) return value.map((item) => boundedStrings(item, maxLength, depth + 1));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .map(([key, item]) => [key, boundedStrings(item, maxLength, depth + 1)]));
+  }
+  return value;
 }
 
 export function normalizeTeacherReview(value) {
@@ -70,28 +86,66 @@ export function buildTeacherReviewPrompt({ profile, instruction, proposal, histo
     })),
     proposedStep: proposal
   };
+  // Ordered from least to most damaging. Every step must be able to run to the end, otherwise
+  // the ladder has a floor above the limit and a normal three-source research result aborts the
+  // mission instead of being reviewed with less context.
+  const shrinkSteps = [
+    () => (payload.durablePrinciples.length ? Boolean(payload.durablePrinciples.pop()) : false),
+    () => (payload.publicDocumentation.length > 1 ? Boolean(payload.publicDocumentation.pop()) : false),
+    () => {
+      if (!payload.publicDocumentation.length) return false;
+      const before = JSON.stringify(payload.publicDocumentation);
+      payload.publicDocumentation = payload.publicDocumentation.map((source) => ({
+        title: boundedText(source.title, 120),
+        url: boundedText(source.url, 200),
+        excerpt: boundedText(source.excerpt, 400)
+      }));
+      return JSON.stringify(payload.publicDocumentation) !== before;
+    },
+    () => (payload.publicDocumentation.length ? Boolean(payload.publicDocumentation.pop()) : false),
+    () => (payload.verifiedHistory.length > 1 ? Boolean(payload.verifiedHistory.shift()) : false),
+    () => (payload.humanGuidance.length > 1 ? Boolean(payload.humanGuidance.shift()) : false),
+    () => {
+      if (payload.teacher.values.length <= 600 && payload.task.length <= 600) return false;
+      payload.teacher.values = payload.teacher.values.slice(0, 600);
+      payload.task = payload.task.slice(0, 600);
+      return true;
+    },
+    () => (payload.verifiedHistory.length ? Boolean(payload.verifiedHistory.shift()) : false),
+    () => (payload.humanGuidance.length ? Boolean(payload.humanGuidance.shift()) : false),
+    () => {
+      if (!payload.teacher.mission && !payload.teacher.values) return false;
+      payload.teacher.mission = '';
+      payload.teacher.values = '';
+      return true;
+    },
+    () => {
+      const bounded = boundedStrings(payload.proposedStep, 400);
+      if (JSON.stringify(bounded) === JSON.stringify(payload.proposedStep)) return false;
+      payload.proposedStep = bounded;
+      return true;
+    },
+    () => {
+      const bounded = boundedStrings(payload.proposedStep, 120);
+      if (JSON.stringify(bounded) === JSON.stringify(payload.proposedStep)) return false;
+      payload.proposedStep = bounded;
+      return true;
+    },
+    () => {
+      if (payload.task.length <= 300) return false;
+      payload.task = payload.task.slice(0, 300);
+      return true;
+    }
+  ];
+
   let serialized = JSON.stringify(payload);
-  while (serialized.length > 3_900 && payload.durablePrinciples.length) {
-    payload.durablePrinciples.pop();
-    serialized = JSON.stringify(payload);
+  for (const shrink of shrinkSteps) {
+    while (serialized.length > REVIEW_PROMPT_LIMIT && shrink()) {
+      serialized = JSON.stringify(payload);
+    }
+    if (serialized.length <= REVIEW_PROMPT_LIMIT) return serialized;
   }
-  while (serialized.length > 3_900 && payload.publicDocumentation.length > 1) {
-    payload.publicDocumentation.pop();
-    serialized = JSON.stringify(payload);
-  }
-  while (serialized.length > 3_900 && payload.verifiedHistory.length > 1) {
-    payload.verifiedHistory.shift();
-    serialized = JSON.stringify(payload);
-  }
-  while (serialized.length > 3_900 && payload.humanGuidance.length > 1) {
-    payload.humanGuidance.shift();
-    serialized = JSON.stringify(payload);
-  }
-  if (serialized.length > 3_900) {
-    payload.teacher.values = payload.teacher.values.slice(0, 600);
-    payload.task = payload.task.slice(0, 600);
-    serialized = JSON.stringify(payload);
-  }
-  if (serialized.length > 3_900) throw new TypeError('Teacher review prompt is too large.');
-  return serialized;
+  // Only reachable when the proposal alone, with every string cut to 120 characters, still
+  // exceeds the limit. Dropping the queued actions instead would hide them from the review.
+  throw new TypeError('Teacher review prompt is too large.');
 }

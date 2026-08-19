@@ -278,7 +278,7 @@ try {
         $point = $entry.point
         if ($null -eq $point) { throw "PowerShell pointer validation: $($entry.label) is missing." }
         if (-not (Test-PointInside $point $request.allowedBounds)) {
-            throw "PowerShell pointer validation: $($entry.label) ($($point.x),$($point.y)) is outside the AI display."
+            throw "PowerShell pointer validation: $($entry.label) ($($point.x),$($point.y)) is outside the allowed action area on the AI display."
         }
         if ($point.x -lt $windowRect.Left -or $point.x -ge $windowRect.Right -or $point.y -lt $windowRect.Top -or $point.y -ge $windowRect.Bottom) {
             throw "PowerShell pointer validation: $($entry.label) ($($point.x),$($point.y)) is outside the target window."

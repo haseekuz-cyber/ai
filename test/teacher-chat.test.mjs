@@ -110,3 +110,41 @@ test('JARVIS cannot pass an orphan runtime file as a working reprogramming', asy
   ]);
   assert.equal(validateTeacherProposalArchitecture(integrated), true);
 });
+
+test('a screenshot chat with full web sources shrinks instead of refusing the request', () => {
+  // The screenshot limit is 5500 and the ladder used to stop at one full source (url 1000 plus
+  // excerpt 2000), so a normal researched question threw "Teacher chat prompt is too large".
+  const prompt = buildTeacherChatPrompt({
+    profile: { name: 'Q', mission: 'm'.repeat(800), values: 'v'.repeat(1_500) },
+    message: 'u'.repeat(4_000),
+    currentTask: 't'.repeat(2_000),
+    screenshot: true,
+    selectedApplication: { name: 'CorelDRAW', processName: 'CorelDRW' },
+    history: [
+      { role: 'user', text: 'h'.repeat(700) },
+      { role: 'assistant', text: 'h'.repeat(700) },
+      { role: 'user', text: 'h'.repeat(700) }
+    ],
+    webSources: Array.from({ length: 4 }, () => ({
+      title: 'a'.repeat(180), url: 'u'.repeat(1_000), excerpt: 'e'.repeat(2_000)
+    }))
+  });
+  assert.ok(prompt.length <= 5_500);
+  const parsed = JSON.parse(prompt);
+  assert.ok(parsed.userMessage.length > 0);
+  assert.equal(parsed.attachment, 'A fresh user-provided screenshot is attached.');
+});
+
+test('a text chat keeps the whole user message and a web source within its larger limit', () => {
+  const parsed = JSON.parse(buildTeacherChatPrompt({
+    profile: { name: 'Q', mission: 'm'.repeat(800), values: 'v'.repeat(1_500) },
+    message: 'u'.repeat(4_000),
+    currentTask: 't'.repeat(2_000),
+    screenshot: false,
+    webSources: Array.from({ length: 4 }, () => ({
+      title: 'a'.repeat(180), url: 'u'.repeat(1_000), excerpt: 'e'.repeat(2_000)
+    }))
+  }));
+  assert.equal(parsed.userMessage.length, 4_000);
+  assert.ok(parsed.webSources.length >= 1);
+});

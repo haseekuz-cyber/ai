@@ -123,9 +123,18 @@ function fitPointToAllowedBounds(point, allowedBounds, label = 'point') {
   const y = Number(point.y);
   const outsideBy = Math.max(minX - x, x - maxX, minY - y, y - maxY, 0);
   if (outsideBy > displayFrameTolerancePx) {
-    const error = new RangeError(`JavaScript pointer validation: ${label} (${x},${y}) is outside the AI display.`);
+    // allowedBounds is the AI display intersected with the selected application's window, so
+    // naming the display alone sent the error packet and the self-improvement search after the
+    // wrong cause when the point was on the AI display but outside the application.
+    const area = `${minX},${minY} to ${maxX},${maxY}`;
+    const error = new RangeError(
+      `JavaScript pointer validation: ${label} (${x},${y}) is outside the allowed action area ${area} on the AI display.`
+    );
     error.code = 'pointer_outside_ai_display';
-    error.details = { stage: 'javascript-boundary-fit', label, point: { x, y }, allowedBounds, outsideBy };
+    error.details = {
+      stage: 'javascript-boundary-fit', label, point: { x, y }, allowedBounds, outsideBy,
+      allowedArea: { minX, minY, maxX, maxY }
+    };
     throw error;
   }
   return {

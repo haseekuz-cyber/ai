@@ -142,18 +142,49 @@ function finite(value, label) {
   return number;
 }
 
+// The convention belongs to a single axis. A model that emits x as a 0..1 fraction and y in
+// screenshot pixels within the same point used to fail the pair test and have the fraction
+// divided by the screenshot width too, which collapsed the click onto the left edge.
+function axisConvention(value, extent) {
+  if (value < 0) return 'out_of_range';
+  if (value > 1) {
+    return Number.isFinite(extent) && extent > 1 && value < extent ? 'pixels' : 'out_of_range';
+  }
+  if (value < 1) return 'fraction';
+  return 'ambiguous';
+}
+
+// 0 and 1 read almost identically in both conventions, so such an axis follows the axis that
+// does carry a convention of its own.
+function resolveConvention(own, other) {
+  if (own !== 'ambiguous') return own;
+  return other === 'ambiguous' ? 'fraction' : other;
+}
+
 function normalizedPoint(value, label, screenshotBounds) {
   requireObject(value, label);
   const x = finite(value.x, `${label}.x`);
   const y = finite(value.y, `${label}.y`);
-  if (x >= 0 && x <= 1 && y >= 0 && y <= 1) return { x, y };
   const width = Number(screenshotBounds?.width);
   const height = Number(screenshotBounds?.height);
-  if (Number.isFinite(width) && Number.isFinite(height) && width > 1 && height > 1 &&
-      x >= 0 && x < width && y >= 0 && y < height) {
-    return { x: x / (width - 1), y: y / (height - 1) };
+  const conventionX = axisConvention(x, width);
+  const conventionY = axisConvention(y, height);
+  if (conventionX === 'out_of_range' || conventionY === 'out_of_range') {
+    throw new TypeError(`${label} must use normalized coordinates or pixels inside the screenshot.`);
   }
-  throw new TypeError(`${label} must use normalized coordinates or pixels inside the screenshot.`);
+  const asFraction = (value, convention, extent) => {
+    if (convention !== 'pixels') return value;
+    // An axis that borrowed the pixel convention from its neighbour still needs its own
+    // screenshot extent to be measurable.
+    if (!Number.isFinite(extent) || extent <= 1) {
+      throw new TypeError(`${label} must use normalized coordinates or pixels inside the screenshot.`);
+    }
+    return value / (extent - 1);
+  };
+  return {
+    x: asFraction(x, resolveConvention(conventionX, conventionY), width),
+    y: asFraction(y, resolveConvention(conventionY, conventionX), height)
+  };
 }
 
 export function normalizeAgentInstruction(value) {

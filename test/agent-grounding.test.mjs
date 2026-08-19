@@ -453,3 +453,26 @@ test('explicit exploratory grounding uses the same final decision and may execut
   assert.equal(result, 'probe');
   assert.equal(calls, 1);
 });
+
+test('planner normalization scales each axis by its own convention', () => {
+  // A point that mixes a 0..1 fraction with screenshot pixels used to fail the pair test and
+  // have the fraction divided by the screenshot width as well, collapsing it onto the left edge.
+  const screenshot = { width: 1920, height: 1080 };
+  const mixed = normalizePlannerOutput({
+    action: { type: 'click', point: { x: 0.413, y: 356 }, targetHint: { name: 'Создать документ...' } },
+    confidence: 0.8
+  }, screenshot);
+  assert.equal(mixed.action.point.x, 0.413);
+  assert.ok(Math.abs(mixed.action.point.y - 356 / 1079) < 1e-9);
+
+  const pixels = normalizePlannerOutput({
+    action: { type: 'click', point: { x: 983, y: 402 }, targetHint: { name: 'Save' } },
+    confidence: 0.8
+  }, screenshot);
+  assert.ok(Math.abs(pixels.action.point.x - 983 / 1919) < 1e-9);
+
+  assert.throws(() => normalizePlannerOutput({
+    action: { type: 'click', point: { x: 983, y: 402 }, targetHint: { name: 'Save' } },
+    confidence: 0.8
+  }), /normalized coordinates or pixels inside the screenshot/);
+});

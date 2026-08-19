@@ -2,7 +2,12 @@
 param(
     [int]$Port = 47731,
     [string]$DisplayDevice,
-    [switch]$EnableCapture
+    [switch]$EnableCapture,
+    # Autonomous UI mutations (ui.uia clicks/edits) are on by default so the
+    # assistant can actually act. Pass -EnableMutations:$false to run observe-only.
+    # NOTE: this only requests mutations; the benchmark gate must also pass
+    # (a valid latest-report.json), otherwise policy still denies ui.uia.
+    [bool]$EnableMutations = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,6 +32,10 @@ if ($DisplayDevice) {
 }
 if ($EnableCapture) {
     $env:AI_WORKSTATION_CAPTURE_ENABLED = '1'
+}
+# An explicit env value set by the caller always wins over the switch default.
+if (-not $env:AI_WORKSTATION_AGENT_MUTATIONS) {
+    $env:AI_WORKSTATION_AGENT_MUTATIONS = if ($EnableMutations) { '1' } else { '0' }
 }
 if (-not $env:AI_WORKSTATION_TOKEN) {
     $env:AI_WORKSTATION_TOKEN = 'development-local-only'

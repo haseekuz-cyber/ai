@@ -130,27 +130,56 @@ export function buildTeacherChatPrompt({
     attachment: screenshot ? 'A fresh user-provided screenshot is attached.' : null
   };
   const limit = screenshot ? 5_500 : 18_000;
+  // Ordered from least to most damaging, and every step runs to the end. A floor above the
+  // limit — one full web source plus two conversation turns — used to abort the whole request
+  // instead of answering with less context.
+  const shrinkSteps = [
+    () => (payload.projectContext.length > 1 ? Boolean(payload.projectContext.pop()) : false),
+    () => (payload.webSources.length > 1 ? Boolean(payload.webSources.pop()) : false),
+    () => (payload.recentConversation.length > 2 ? Boolean(payload.recentConversation.shift()) : false),
+    () => {
+      if (!payload.projectContext.length && payload.teacher.values.length <= 600 &&
+          payload.userMessage.length <= (screenshot ? 1_200 : 3_000)) return false;
+      payload.projectContext = [];
+      payload.teacher.values = payload.teacher.values.slice(0, 600);
+      payload.userMessage = payload.userMessage.slice(0, screenshot ? 1_200 : 3_000);
+      return true;
+    },
+    () => {
+      if (!payload.webSources.length) return false;
+      const before = JSON.stringify(payload.webSources);
+      payload.webSources = payload.webSources.map((source) => ({
+        title: clean(source.title, 120),
+        url: clean(source.url, 200),
+        excerpt: clean(source.excerpt, 400)
+      }));
+      return JSON.stringify(payload.webSources) !== before;
+    },
+    () => (payload.webSources.length ? Boolean(payload.webSources.pop()) : false),
+    () => (payload.recentConversation.length ? Boolean(payload.recentConversation.shift()) : false),
+    () => {
+      if (payload.currentTask.length <= 300) return false;
+      payload.currentTask = payload.currentTask.slice(0, 300);
+      return true;
+    },
+    () => {
+      if (!payload.teacher.mission && !payload.teacher.values) return false;
+      payload.teacher.mission = '';
+      payload.teacher.values = '';
+      return true;
+    }
+  ];
+
   let serialized = JSON.stringify(payload);
-  while (serialized.length > limit && payload.projectContext.length > 1) {
-    payload.projectContext.pop();
-    serialized = JSON.stringify(payload);
+  for (const shrink of shrinkSteps) {
+    while (serialized.length > limit && shrink()) {
+      serialized = JSON.stringify(payload);
+    }
+    if (serialized.length <= limit) return serialized;
   }
-  while (serialized.length > limit && payload.webSources.length > 1) {
-    payload.webSources.pop();
-    serialized = JSON.stringify(payload);
-  }
-  while (serialized.length > limit && payload.recentConversation.length > 2) {
-    payload.recentConversation.shift();
-    serialized = JSON.stringify(payload);
-  }
-  if (serialized.length > limit) {
-    payload.projectContext = [];
-    payload.teacher.values = payload.teacher.values.slice(0, 600);
-    payload.userMessage = payload.userMessage.slice(0, screenshot ? 1_200 : 3_000);
-    serialized = JSON.stringify(payload);
-  }
-  if (serialized.length > limit) throw new TypeError('Teacher chat prompt is too large.');
-  return serialized;
+  // Only reachable when the user's own message alone exceeds the limit. Truncating it further
+  // would answer a question the user did not ask.
+  throw new TypeError('Teacher chat prompt is too large.');
 }
 
 export async function appendTeacherChatEvent(filePath, event) {
