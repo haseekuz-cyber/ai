@@ -1,0 +1,23 @@
+{
+  "task_id": "e04e6c52-cd86-4447-911c-1d55ced73ec7",
+  "user_request": "List files in current directory",
+  "objective": "Explore the workspace",
+  "current_state": "created",
+  "created_at": "2026-08-19T07:33:08.928274",
+  "updated_at": "2026-08-19T07:33:08.928281",
+  "completed_at": null,
+  "plan": null,
+  "current_step_index": 0,
+  "completed_steps": [],
+  "tool_calls": [],
+  "observations": [],
+  "errors": [],
+  "retries": 0,
+  "max_retries": 5,
+  "artifacts": [],
+  "final_result": null,
+  "memory_context": {},
+  "permissions": {},
+  "cancelled": false,
+  "paused": false
+}

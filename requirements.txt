@@ -1,0 +1,33 @@
+# WORKER - Local Autonomous AI Computer Agent
+# Phase 0 Dependencies
+
+# Core
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Async support
+asyncio-throttle>=1.0.2
+
+# HTTP client (for LLM APIs)
+httpx>=0.25.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Type checking (dev)
+mypy>=1.7.0
+
+# Logging
+python-json-logger>=2.0.7
+
+# Future phases (commented for now)
+# pywin32; sys_platform == 'win32'
+# psutil
+# playwright
+# Pillow
+# pytesseract
+# fastapi
+# uvicorn
+# sqlalchemy

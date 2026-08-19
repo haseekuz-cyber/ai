@@ -1,16 +1,13 @@
 {
-  "name": "ai-workstation",
+  "name": "worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local Windows AI workplace with independent second-monitor window control",
+  "description": "Local Autonomous AI Computer Agent - WORKER",
   "scripts": {
-    "controller": "node src/controller.mjs",
-    "worker": "node src/worker.mjs",
-    "vision:test": "node scripts/check-lmstudio-vision.mjs",
-    "gui:benchmark": "node scripts/benchmark-gui-model.mjs",
-    "eval:replay": "node scripts/evaluate-replay.mjs",
-    "test": "node --test"
+    "test": "pytest tests/ -v",
+    "test:unit": "pytest tests/unit/ -v",
+    "test:integration": "pytest tests/integration/ -v"
   },
   "engines": {
     "node": ">=22"
