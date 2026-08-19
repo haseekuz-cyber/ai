@@ -5,14 +5,36 @@ export function guiModelFamily(model) {
   return 'generic';
 }
 
+// The scale belongs to a single number, not to the pair. GUI-Owl has been observed emitting
+// one axis as a 0..1 fraction and the other in thousandths inside the same point, and deciding
+// for the pair divided the fraction by 1000 as well, which moved the click to the screen edge.
+function axisScale(value) {
+  if (value < 0 || value > 1_000) return 'out_of_range';
+  if (value > 1) return 'thousandths';
+  if (value > 0 && value < 1) return 'fraction';
+  return 'ambiguous';
+}
+
+// 0 and 1 mean almost the same place in both conventions, so an axis that carries no scale of
+// its own follows the axis that does.
+function resolveScale(own, other) {
+  if (own !== 'ambiguous') return own;
+  return other === 'ambiguous' ? 'fraction' : other;
+}
+
 function normalizeThousandPoint(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const x = Number(value.x);
   const y = Number(value.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return value;
-  if (x >= 0 && x <= 1 && y >= 0 && y <= 1) return value;
-  if (x >= 0 && x <= 1_000 && y >= 0 && y <= 1_000) return { ...value, x: x / 1_000, y: y / 1_000 };
-  return value;
+  const scaleX = axisScale(x);
+  const scaleY = axisScale(y);
+  if (scaleX === 'out_of_range' || scaleY === 'out_of_range') return value;
+  return {
+    ...value,
+    x: resolveScale(scaleX, scaleY) === 'thousandths' ? x / 1_000 : x,
+    y: resolveScale(scaleY, scaleX) === 'thousandths' ? y / 1_000 : y
+  };
 }
 
 function normalizeActionCoordinates(action) {

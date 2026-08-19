@@ -56,7 +56,7 @@ test('display boundary fitting still rejects a genuinely off-display point', () 
     from: { x: 1800, y: 100 },
     to: { x: 2783, y: 485 },
     durationMs: 350
-  }, { x: 1920, y: 0, width: 1920, height: 1080 }), /outside the AI display/);
+  }, { x: 1920, y: 0, width: 1920, height: 1080 }), /outside the allowed action area 1920,0 to 3839,1079 on the AI display/);
 });
 
 test('recorded and learned drags retain modifiers and trajectory semantics', () => {

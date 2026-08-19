@@ -47,3 +47,28 @@ test('programmer can modify only an isolated candidate and never apply it', asyn
   assert.equal((await policy.authorize({ manifest: manifest('ui.uia', 'reversible_local'), sessionMode: 'programmer' })).allowed, false);
   assert.equal((await policy.authorize({ manifest: manifest('code.apply', 'persistent_local'), sessionMode: 'programmer' })).allowed, false);
 });
+
+test('an exact user confirmation authorizes a reversible action even while the rollout gate is closed', async () => {
+  const policy = createUnifiedPolicy({
+    gateProvider: () => ({ allowed: false, reason: 'mutations_not_requested' }),
+    sessionProvider: async () => ({ mode: 'guided', tools: { approved: { approval: 'approved' } } })
+  });
+  const result = await policy.authorize({
+    sessionId: 's', toolInvocationId: 'approved', manifest: manifest('ui.uia', 'reversible_local')
+  });
+  assert.equal(result.allowed, true);
+  assert.equal(result.reason, 'user_confirmed_exact_invocation');
+});
+
+test('a closed rollout gate still blocks autonomous mutations and unconfirmed guided ones', async () => {
+  const policy = createUnifiedPolicy({
+    gateProvider: () => ({ allowed: false, reason: 'mutations_not_requested' }),
+    sessionProvider: async () => ({ mode: 'guided', tools: {} })
+  });
+  assert.equal((await policy.authorize({
+    manifest: manifest('ui.uia', 'reversible_local'), sessionMode: 'autonomous'
+  })).reason, 'mutations_not_requested');
+  assert.equal((await policy.authorize({
+    sessionId: 's', toolInvocationId: 'unknown', manifest: manifest('ui.uia', 'reversible_local')
+  })).reason, 'user_confirmation_required');
+});

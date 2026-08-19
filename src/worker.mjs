@@ -184,6 +184,7 @@ import {
 import { AgentEngine } from './agent-engine.mjs';
 import { ContextCompiler } from './context-compiler.mjs';
 import { SessionStore } from './session-store.mjs';
+import { restoredSafetyPause, safetyStateToPersist } from './safety-state.mjs';
 import { ToolInvocationLedger } from './tool-invocation-ledger.mjs';
 import { ToolRegistry } from './tool-registry.mjs';
 import { InputArbiter } from './input-arbiter.mjs';
@@ -213,6 +214,7 @@ let unifiedBenchmarkGate = { allowed: false, reason: 'not_evaluated', report: nu
 const missionTtlMs = 30 * 60 * 1000;
 let executionPaused = false;
 let safetyReason = null;
+let safetySource = null;
 let safetyUpdatedAt = new Date().toISOString();
 let auditError = null;
 let safetyHotkey = null;
@@ -313,6 +315,7 @@ function publicSafetyState() {
   return {
     paused: executionPaused,
     reason: safetyReason,
+    source: safetySource,
     updatedAt: safetyUpdatedAt,
     activeModelRequests: activeLmStudioRequestCount(),
     blocks: ['uia-actions', 'pointer-actions', 'agent-execution', 'skill-execution']
@@ -945,19 +948,35 @@ async function recoverSurfaceText({ planned, observation, instruction }) {
 }
 
 async function loadSafetyState() {
+  let stored = null;
   try {
-    const stored = JSON.parse(await fs.readFile(config.safetyStatePath, 'utf8'));
-    executionPaused = stored.paused === true;
-    safetyReason = typeof stored.reason === 'string' ? stored.reason : null;
-    safetyUpdatedAt = typeof stored.updatedAt === 'string' ? stored.updatedAt : safetyUpdatedAt;
+    stored = JSON.parse(await fs.readFile(config.safetyStatePath, 'utf8'));
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
+    return;
+  }
+  const restored = restoredSafetyPause(stored);
+  executionPaused = restored.paused;
+  safetyReason = restored.reason;
+  safetySource = restored.source;
+  if (restored.updatedAt) safetyUpdatedAt = restored.updatedAt;
+  if (stored.paused === true && !restored.paused) {
+    await audit('safety.pause_not_restored', {
+      storedSource: typeof stored.source === 'string' ? stored.source : null,
+      discardedReason: restored.discardedReason
+    });
   }
 }
 
 async function persistSafetyState() {
   await fs.mkdir(path.dirname(config.safetyStatePath), { recursive: true });
-  await fs.writeFile(config.safetyStatePath, JSON.stringify(publicSafetyState(), null, 2), 'utf8');
+  const record = safetyStateToPersist({
+    paused: executionPaused,
+    reason: safetyReason,
+    source: safetySource,
+    updatedAt: safetyUpdatedAt
+  });
+  await fs.writeFile(config.safetyStatePath, JSON.stringify(record, null, 2), 'utf8');
 }
 
 async function audit(type, details = {}) {
@@ -1072,8 +1091,11 @@ async function shutdownWorkerRuntime(reason = 'Full shutdown requested by user')
     return { shutdown: true, alreadyInProgress: true };
   }
   workerShutdownInProgress = true;
+  // A shutdown pause is the mechanism that halts in-flight work, not an operator decision:
+  // it is persisted with its own source so the next boot does not restore it.
   executionPaused = true;
   safetyReason = reason;
+  safetySource = 'shutdown';
   safetyUpdatedAt = new Date().toISOString();
   const abortedModelRequests = abortActiveLmStudioRequests(reason);
   if (observerBackgroundTimer) clearTimeout(observerBackgroundTimer);
@@ -1532,9 +1554,12 @@ async function captureUnifiedObservation(windowHandle, label = 'agent-observe') 
 function registerUnifiedRuntimeTools(registry) {
   registry.register({
     name: 'ui.observe',
-    description: 'Capture a fresh full AI-display screenshot and inspect the selected Windows application before deciding an action.',
+    description: 'Capture a fresh full AI-display screenshot and inspect the selected Windows application before deciding an action. Takes NO arguments; to act on an element use ui.uia instead.',
     risk: 'read_only', readOnly: true, idempotency: 'retryable',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+    // Local models often attach ui.uia-style fields (action/selector) to an observe
+    // call. Observe ignores its input, so tolerate extras instead of failing the step
+    // and tripping the consecutive-failure shutdown; the agent re-plans from fresh state.
+    inputSchema: { type: 'object', properties: {}, additionalProperties: true }
   }, async (_args, context) => {
     const windowHandle = Number(context.surface?.windowHandle);
     if (!Number.isInteger(windowHandle) || windowHandle <= 0) throw new TypeError('This session has no selected UI window.');
@@ -1560,6 +1585,55 @@ function registerUnifiedRuntimeTools(registry) {
     const requestBody = validateActionRequest({ ...args, windowHandle, confirmed: true });
     const result = await runUiAutomation(config.uiaScript, boundedUiRequest({ operation: 'action', ...requestBody }));
     return { actionResult: result, ...(await captureUnifiedObservation(windowHandle, 'agent-after-uia')) };
+  });
+
+  registry.register({
+    name: 'ui.pointer',
+    description: 'Click, double-click, scroll, drag, type, or press a safe key at a screen coordinate on the selected application, then return a fresh observation. Use this for canvas/custom apps (e.g. CorelDRAW) that expose no invokable UI Automation elements, where ui.uia cannot act. Read the (x,y) target from the latest ui.observe screenshot; the point is clamped to the application window on the AI display.',
+    risk: 'reversible_local', readOnly: false, idempotency: 'at_most_once',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['click', 'doubleClick', 'scroll', 'drag', 'typeText', 'pressKey'] },
+        point: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'], additionalProperties: false },
+        from: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'], additionalProperties: false },
+        to: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'], additionalProperties: false },
+        button: { type: 'string', enum: ['left', 'right'] },
+        delta: { type: 'integer' },
+        text: { type: 'string' },
+        textMode: { type: 'string', enum: ['replace', 'insert'] },
+        key: { type: 'string' },
+        durationMs: { type: 'integer' },
+        modifiers: { type: 'array', items: { type: 'string' } },
+        trajectory: { type: 'array', items: { type: 'object' } }
+      },
+      required: ['action'], additionalProperties: false
+    }
+  }, async (args, context) => {
+    const windowHandle = Number(context.surface?.windowHandle);
+    if (!Number.isInteger(windowHandle) || windowHandle <= 0) throw new TypeError('This session has no selected UI window.');
+    // Inspect the window's LIVE bounds so the coordinate is clamped to where the app
+    // actually is right now (the model read (x,y) off the latest observe frame).
+    const inspected = await runUiAutomation(
+      config.uiaScript,
+      boundedUiRequest({ operation: 'inspect', windowHandle, maxDepth: 0, maxElements: 1 }),
+      { timeoutMs: 30_000 }
+    );
+    if (!inspected.window?.bounds) throw new TypeError('The selected window exposes no bounds; cannot place a coordinate action.');
+    const display = resolveUiAutomationDisplay(diagnostics, config.assignedDisplay);
+    const allowedBounds = intersectBounds(display.bounds, inspected.window.bounds);
+    // No executionSurface/inputLease: the arbiter lease TTL (<=250ms) cannot span the
+    // inspect above, so — exactly like the shipped direct-window pointer path — the
+    // action runs unleased, bounds-clamped strictly to (window ∩ AI display).
+    const bridgeRequest = createBoundedPointerRequest({
+      action: { ...args, windowHandle, confirmed: true },
+      allowedBounds,
+      forbiddenProcessNames: ['ChatGPT', 'Codex', 'cmd', 'conhost', 'OpenConsole', 'powershell', 'pwsh', 'WindowsTerminal']
+    });
+    const previewPoint = bridgeRequest.action === 'drag' ? bridgeRequest.to : bridgeRequest.point;
+    if (previewPoint && config.pointerOverlayEnabled) await moveVirtualPointer(config.pointerStatePath, previewPoint);
+    const actionResult = await runPointerAction(config.pointerBridgeScript, bridgeRequest, { timeoutMs: 10_000 });
+    return { actionResult, ...(await captureUnifiedObservation(windowHandle, 'agent-after-pointer')) };
   });
 
   registry.register({
@@ -2556,9 +2630,15 @@ const server = http.createServer(async (request, response) => {
       safetyReason = typeof input.reason === 'string' && input.reason.trim()
         ? input.reason.trim().slice(0, 240)
         : 'Paused by user';
+      safetySource = 'user_stop';
       safetyUpdatedAt = new Date().toISOString();
       await persistSafetyState();
-      await audit('safety.paused', { reason: safetyReason, abortedModelRequests, observationStopped: true });
+      await audit('safety.paused', {
+        reason: safetyReason,
+        source: safetySource,
+        abortedModelRequests,
+        observationStopped: true
+      });
       return sendJson(response, 200, publicSafetyState());
     }
 
@@ -2569,6 +2649,7 @@ const server = http.createServer(async (request, response) => {
       }
       executionPaused = false;
       safetyReason = null;
+      safetySource = null;
       safetyUpdatedAt = new Date().toISOString();
       await persistSafetyState();
       await audit('safety.resumed');
