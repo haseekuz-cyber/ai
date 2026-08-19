@@ -1,66 +1,170 @@
-# AI Workstation
+# WORKER - Local Autonomous AI Computer Agent
 
-Локальный обучаемый цифровой сотрудник для Windows. Он работает в той же учётной записи на втором мониторе, наблюдает весь назначенный дисплей, а физические действия ограничивает выбранной программой и не перехватывает мышь пользователя.
+## Phase 0: Foundation — Complete ✅
 
-## Что работает
+### Overview
 
-- единый JARVIS хранит цель, решения, вызовы инструментов и результаты в одной `AgentSession`; прежние роли Planner/Worker/Teacher больше не передают друг другу скрытое состояние в новом контуре;
-- новая задача и чат программиста изолированы друг от друга, поэтому приветствие не наследует старую UI-ошибку и интернет вызывается только выбранным моделью инструментом;
-- репозиторий читается ограниченными `repo.index/search/read/diff`, а изменения кода проходят через отдельного кандидата, тесты, сравнение, явное применение и откат;
-- изменяющие инструменты единого контура закрыты benchmark-gate: одного флага недостаточно, нужен проходящий отчёт для активной модели и версии протокола;
+WORKER is a local AI operator that can see, understand, plan, act, observe, verify, and correct actions on your computer. This is **not** a chatbot — it's an **agentic execution system**.
 
-- второй монитор автоматически назначается рабочим пространством AI;
-- синий AI-курсор отображается отдельно и не генерирует системный ввод;
-- кнопки и поля управляются через UI Automation, а холсты и нестандартные окна — локальными сообщениями конкретному HWND;
-- локальная vision-модель в LM Studio получает свежий кадр всего AI-монитора и временные ключевые кадры важных изменений;
-- интерфейсное состояние обновляется событийно, а короткие мини-планы уменьшают число дорогих вызовов модели;
-- обычная задача ждёт подтверждения, свободный режим допускает только ограниченные обратимые локальные опыты;
-- Telegram, браузеры и другие внешние приложения автоматически получают уровень риска `external_effect`;
-- действия можно показать и сохранить как причинный навык с кадрами до/после, модификаторами, траекторией, проверкой и финальным референсом;
-- навык повторно находит элемент по AutomationId, имени или классу и лишь затем использует сохранённые координаты;
-- пароли не сохраняются, а неидентифицированный текст считается чувствительным;
-- `Ctrl+Shift+F12` и кнопка `СТОП ИИ` блокируют новые действия;
-- журнал действий записывается в `D:\AI-Work\Agent-Data\Logs\actions.jsonl` без введённого текста.
-- ошибки сохраняются как обезличенные `ErrorPacket`, а JARVIS выбирает между исправлением кода, навыком, RAG, памятью, промптом или кандидатом для обучения;
-- кодовый JARVIS работает только через отдельную копию, сравнение исходных и новых тестов, явное применение и откат.
+### Architecture
 
-Отдельная Windows-учётная запись, вторая ОС, Mouse Mux и multiseat-драйверы не используются.
-
-## Запуск
-
-Дважды нажмите `AI Workstation.exe` на рабочем столе. Лаунчер скрыто запускает LM Studio Server, Worker и панель `http://127.0.0.1:47730`. Повторный запуск не создаёт дубликаты процессов.
-
-Для разработки:
-
-```powershell
-.\scripts\start-all.ps1
+```
+USER → ASSISTANT → WORKER CORE → TOOLS → COMPUTER
+                          ↓
+                    OBSERVER → VERIFIER
 ```
 
-Единый контур включён в оценочном режиме. Чтобы запросить изменяющие действия, задайте `AI_WORKSTATION_AGENT_MUTATIONS=1`; они всё равно останутся закрыты, пока не пройдёт benchmark текущей модели. Проверка манифеста без вызова LM Studio:
+### Core Components (Phase 0)
 
-```powershell
-& 'C:\Users\user\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' .\scripts\benchmark-unified-model.mjs --manifest 'D:\AI-Work\Agent-Data\Evaluations\UnifiedModel\cases.jsonl' --dry-run
+| Component | Status | Description |
+|-----------|--------|-------------|
+| **Models** | ✅ | Typed data models for Task, Plan, Step, Tool, Observation, Verification |
+| **Event Bus** | ✅ | Pub/sub system for inter-module communication |
+| **Tool Interface** | ✅ | Abstract base class and registry for tools |
+| **Filesystem Tools** | ✅ | Read, write, list, copy, delete files |
+
+### Task State Machine
+
+```
+CREATED → ANALYZING → PLANNING → EXECUTING → OBSERVING → VERIFYING → COMPLETED
+                               ↓                                    ↓
+                         WAITING_FOR_PERMISSION                FAILED/CANCELLED
 ```
 
-Манифест должен содержать ровно 100 structured-output, 30 UI, 10 code и минимум один session-isolation кейс. На текущей машине этот реальный набор ещё не собран; отсутствие `cases.jsonl` означает `not verified`, а не успешный benchmark.
+### Quick Start
 
-## Данные
+```bash
+# Install dependencies
+pip install pydantic pydantic-settings pytest pytest-asyncio
 
-- приложение: `D:\AI-Apps\AI-Workstation`;
-- модели: `D:\AI-Models\LM-Studio`;
-- снимки, навыки, журнал и состояние безопасности: `D:\AI-Work\Agent-Data`.
+# Run tests
+pytest tests/ -v
 
-## Граница безопасности
+# Import core components
+from worker.core import Task, TaskState, ToolRegistry, event_bus
+from worker.tools.filesystem import FileReadTool, FileWriteTool
+```
 
-Исполнитель не вызывает `SetCursorPos`, `SendInput` или `SendKeys`. Наблюдение охватывает назначенный AI-монитор, но точка действия должна находиться внутри свежей видимой поверхности выбранного приложения. Планирование не выполняет действий. Отправка сообщений, удаление, публикация и другие внешние эффекты не получают автоматическое подтверждение.
+### Project Structure
 
-Новый unified-контур пока регистрирует только безопасное наблюдение, UI Automation, web search и ограниченные инструменты репозитория/кандидата. Физический canvas-ввод не включён в него: холодный запуск PowerShell дольше 250-мс `InputLease`, поэтому такой путь нельзя честно считать готовым без постоянного нативного input-bridge.
+```
+worker/
+├── __init__.py          # Package metadata
+├── core/
+│   ├── __init__.py      # Core exports
+│   ├── models.py        # Task, Plan, Step, Tool models
+│   ├── events.py        # Event bus and event types
+│   └── tools.py         # BaseTool, ToolResult, ToolRegistry
+├── tools/
+│   ├── filesystem/      # File operations
+│   ├── terminal/        # Shell commands (TODO)
+│   ├── system/          # Process management (TODO)
+│   ├── screen/          # Screenshots (TODO)
+│   └── ...
+├── llm/                 # LLM providers (TODO)
+├── memory/              # Persistent memory (TODO)
+├── policies/            # Permissions (TODO)
+└── self_extension/      # Tool generation (TODO)
 
-## Текущее ограничение
+tests/
+├── unit/                # Unit tests
+└── integration/         # Integration tests
+```
 
-Некоторые программы с полностью нестандартным холстом могут игнорировать оконные сообщения. Для них требуется живой тест и, при необходимости, отдельный адаптер действия; физическая мышь пользователя всё равно не используется.
+### Key Models
 
-- [Архитектура](docs/architecture.md)
-- [Целевая архитектура JARVIS 2.0 и критерии готовности](docs/JARVIS-2.0.md)
-- [План проверок](docs/poc-test-plan.md)
-- [Текущий компьютер](docs/current-machine.md)
+#### Task
+```python
+task = Task(
+    user_request="Fix the bug in app.py",
+    objective="Identify and fix the error"
+)
+# States: CREATED, ANALYZING, PLANNING, EXECUTING, OBSERVING, VERIFYING, COMPLETED
+```
+
+#### Plan
+```python
+plan = Plan(
+    task_id=task.task_id,
+    objective="Fix application",
+    steps=[
+        Step(description="Read source", action="files.read"),
+        Step(description="Run tests", action="terminal.run"),
+    ]
+)
+```
+
+#### Tool
+```python
+class MyTool(BaseTool):
+    name = "my.tool"
+    category = ToolCategory.FILESYSTEM
+    permission_level = RiskLevel.LOW
+    
+    async def execute(self, **kwargs) -> ToolResult:
+        return ToolResult(success=True, data={...})
+```
+
+### Events
+
+Available event types:
+- `TASK_CREATED`, `TASK_STARTED`, `TASK_COMPLETED`, `TASK_FAILED`
+- `PLAN_CREATED`, `STEP_STARTED`, `STEP_COMPLETED`
+- `TOOL_REQUESTED`, `TOOL_STARTED`, `TOOL_FINISHED`
+- `PERMISSION_REQUESTED`, `PERMISSION_GRANTED`, `PERMISSION_DENIED`
+- `OBSERVATION_CREATED`, `VERIFICATION_PASSED`, `VERIFICATION_FAILED`
+- `EMERGENCY_STOP`
+
+Subscribe to events:
+```python
+from worker.core import event_bus, EventType
+
+def on_task_complete(event):
+    print(f"Task {event.data.task_id} completed!")
+
+event_bus.subscribe(EventType.TASK_COMPLETED, on_task_complete)
+```
+
+### Available Tools
+
+| Tool | Category | Risk | Description |
+|------|----------|------|-------------|
+| `files.read` | FILESYSTEM | LOW | Read file content |
+| `files.write` | FILESYSTEM | MEDIUM | Write/create file |
+| `files.list` | FILESYSTEM | LOW | List directory |
+| `files.copy` | FILESYSTEM | MEDIUM | Copy file/directory |
+| `files.delete` | FILESYSTEM | HIGH | Delete file/directory |
+
+### Next Phases
+
+| Phase | Components | Status |
+|-------|------------|--------|
+| **Phase 1** | Terminal, System tools | 🔄 In Progress |
+| **Phase 2** | Screen capture, Vision | ⏳ Pending |
+| **Phase 3** | Browser automation | ⏳ Pending |
+| **Phase 4** | Memory persistence | ⏳ Pending |
+| **Phase 5** | Permission engine | ⏳ Pending |
+| **Phase 6** | LLM providers | ⏳ Pending |
+| **Phase 7** | Planner, Executor, Observer, Verifier | ⏳ Pending |
+| **Phase 8** | Self-extension | ⏳ Pending |
+
+### Testing
+
+All tests pass:
+```
+======================= 51 passed =======================
+```
+
+Run tests:
+```bash
+pytest tests/unit/ -v       # Unit tests
+pytest tests/integration/ -v  # Integration tests
+```
+
+### License
+
+MIT
+
+---
+
+**WORKER is under active development.** This is Phase 0 foundation. Computer control, vision, and full agent loop coming in subsequent phases.

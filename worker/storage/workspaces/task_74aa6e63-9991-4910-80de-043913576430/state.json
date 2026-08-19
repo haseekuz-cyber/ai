@@ -1,0 +1,23 @@
+{
+  "task_id": "74aa6e63-9991-4910-80de-043913576430",
+  "user_request": "Manual test",
+  "objective": "Test individual components",
+  "current_state": "created",
+  "created_at": "2026-08-19T07:53:50.473318",
+  "updated_at": "2026-08-19T07:53:50.473321",
+  "completed_at": null,
+  "plan": null,
+  "current_step_index": 0,
+  "completed_steps": [],
+  "tool_calls": [],
+  "observations": [],
+  "errors": [],
+  "retries": 0,
+  "max_retries": 5,
+  "artifacts": [],
+  "final_result": null,
+  "memory_context": {},
+  "permissions": {},
+  "cancelled": false,
+  "paused": false
+}
